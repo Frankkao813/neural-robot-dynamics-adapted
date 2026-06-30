@@ -15,6 +15,7 @@
 
 import os
 import sys
+import math
 
 base_dir = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../")
@@ -37,9 +38,10 @@ from envs.warp_sim_envs import RenderMode
 def get_args():
     parser = argparse.ArgumentParser("")
     parser.add_argument("--rl-cfg", 
-                        default="./cfg/Cartpole/cartpole.yaml", 
+                        default=None,
                         type=str, 
-                        help="Path to rl config file.")
+                        help="Path to an RL config file. During playback, an "
+                             "explicit config overrides the checkpoint's saved config.")
     # Some command-line overriding parameters to provide a flexible experiment experience.
     parser.add_argument("--exp-name",
                         default=None,
@@ -64,6 +66,16 @@ def get_args():
                         default=None, 
                         type=int, 
                         help="Number of environments to run in parallel.")
+    parser.add_argument(
+        "--heading-yaws",
+        nargs="+",
+        type=float,
+        default=None,
+        metavar="DEG",
+        help="One ground-plane heading per environment, in degrees. "
+             "For example, '--heading-yaws 0 -90' creates +X- and "
+             "+Z-facing robots (the simulator uses Y-up coordinates).",
+    )
     parser.add_argument("--max-episode-length", 
                         default=None, 
                         type=int, 
@@ -115,13 +127,15 @@ def get_args():
     return args
 
 def load_rl_config(args):
-    if args.playback is not None:
+    if args.rl_cfg is not None:
+        rl_cfg_path = args.rl_cfg
+    elif args.playback is not None:
         policy_dir = os.path.abspath(
             os.path.join(os.path.dirname(os.path.abspath(args.playback)), '../')
         )
         rl_cfg_path = os.path.join(policy_dir, 'rl_cfg.yaml')
     else:
-        rl_cfg_path = args.rl_cfg
+        rl_cfg_path = "./cfg/Cartpole/cartpole.yaml"
     
     with open(rl_cfg_path, 'r') as f:
         rl_cfg = yaml.load(f, Loader=yaml.SafeLoader)
@@ -142,6 +156,22 @@ def load_rl_config(args):
         rl_cfg['env']['model_path'] = args.nerd_model_path
     if args.num_envs is not None:
         rl_cfg['env']['num_envs'] = args.num_envs
+    if args.heading_yaws is not None:
+        if args.num_envs is not None and args.num_envs != len(args.heading_yaws):
+            parser_error = (
+                "--num-envs must match the number of values passed to "
+                "--heading-yaws"
+            )
+            raise ValueError(parser_error)
+        rl_cfg['env']['num_envs'] = len(args.heading_yaws)
+        warp_env_cfg = rl_cfg['env'].setdefault('warp_env_cfg', {})
+        warp_env_cfg['heading_yaws'] = [
+            math.radians(yaw) for yaw in args.heading_yaws
+        ]
+        if len(args.heading_yaws) > 1:
+            # Tracking only environment zero quickly moves the other robot
+            # outside the camera view when their paths diverge.
+            warp_env_cfg['camera_tracking'] = False
     if args.max_episode_length is not None:
         rl_cfg['env']['max_episode_length'] = args.max_episode_length
     if args.max_epochs is not None:
@@ -308,7 +338,5 @@ if __name__ == '__main__':
         (env.visited_state_min, env.visited_state_max), 
         'visited_state_range.pt'
     )
-    
+
     env.close()
-    
-    

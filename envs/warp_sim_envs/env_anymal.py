@@ -33,6 +33,7 @@ def anymal_forward_cost(
     dof_q: int,
     dof_qd: int,
     num_contacts: int,
+    heading_quats: wp.array(dtype=wp.quat),
     # outputs
     cost: wp.array(dtype=wp.float32),
     terminated: wp.array(dtype=wp.bool)
@@ -57,6 +58,9 @@ def anymal_forward_cost(
     
     # convert the linear velocity of the torso from twist representation to the velocity of the center of mass in world frame
     lin_vel = lin_vel - wp.cross(torso_pos, ang_vel)
+    heading_inv = wp.quat_inverse(heading_quats[env_id])
+    lin_vel = wp.quat_rotate(heading_inv, lin_vel)
+    ang_vel = wp.quat_rotate(heading_inv, ang_vel)
     
     target_x_vel = 1.0
     target_z_vel = 0.0
@@ -103,6 +107,7 @@ def anymal_side_cost(
     dof_q: int,
     dof_qd: int,
     num_contacts: int,
+    heading_quats: wp.array(dtype=wp.quat),
     # outputs
     cost: wp.array(dtype=wp.float32),
     terminated: wp.array(dtype=wp.bool)
@@ -127,6 +132,9 @@ def anymal_side_cost(
     
     # convert the linear velocity of the torso from twist representation to the velocity of the center of mass in world frame
     lin_vel = lin_vel - wp.cross(torso_pos, ang_vel)
+    heading_inv = wp.quat_inverse(heading_quats[env_id])
+    lin_vel = wp.quat_rotate(heading_inv, lin_vel)
+    ang_vel = wp.quat_rotate(heading_inv, ang_vel)
     
     target_x_vel = 0.0
     target_z_vel = 1.0
@@ -188,6 +196,7 @@ def compute_observations_anymal_dflex(
     basis_vec1: wp.vec3,
     dof_q: int,
     dof_qd: int,
+    heading_quats: wp.array(dtype=wp.quat),
     # outputs
     obs: wp.array(dtype=float, ndim=2),
 ):
@@ -217,6 +226,14 @@ def compute_observations_anymal_dflex(
 
     # convert the linear velocity of the torso from twist representation to the velocity of the center of mass in world frame
     lin_vel = lin_vel - wp.cross(torso_pos, ang_vel)
+
+    # Express the root pose and velocities in the robot's configured heading
+    # frame. This lets a policy trained for +X walking drive robots spawned at
+    # arbitrary yaw angles without steering them back toward world +X.
+    heading_inv = wp.quat_inverse(heading_quats[env_id])
+    torso_quat = heading_inv * torso_quat
+    lin_vel = wp.quat_rotate(heading_inv, lin_vel)
+    ang_vel = wp.quat_rotate(heading_inv, ang_vel)
 
     up_vec = wp.quat_rotate(torso_quat, basis_vec1)
     heading_vec = wp.quat_rotate(torso_quat, basis_vec0)
@@ -433,6 +450,7 @@ class AnymalEnvironment(Environment):
         task="forward",
         obs_type="dflex",
         camera_tracking=False,
+        heading_yaws=None,
         **kwargs
     ):
         self.seed = seed
@@ -440,8 +458,31 @@ class AnymalEnvironment(Environment):
         self.obs_type = obs_type
         self.camera_tracking = camera_tracking
         self.task = task
+        num_envs = kwargs.get("num_envs", self.num_envs)
+        if heading_yaws is None:
+            heading_yaws = [0.0] * num_envs
+        if len(heading_yaws) != num_envs:
+            raise ValueError(
+                f"heading_yaws must contain one yaw per environment "
+                f"({num_envs} expected, got {len(heading_yaws)})"
+            )
+        self.heading_yaws = np.asarray(heading_yaws, dtype=np.float32)
         super().__init__(**kwargs)
+        self.heading_quats = wp.array(
+            [
+                wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(yaw))
+                for yaw in self.heading_yaws
+            ],
+            dtype=wp.quat,
+            device=self.device,
+        )
         self.after_init()
+
+    def get_env_transform(self, env_id):
+        heading = wp.quat_from_axis_angle(
+            wp.vec3(0.0, 1.0, 0.0), float(self.heading_yaws[env_id])
+        )
+        return wp.transform(self.env_offsets[env_id], heading)
 
     def create_articulation(self, builder):
         urdf_filename = "anymal_joint_limits.urdf"
@@ -596,7 +637,8 @@ class AnymalEnvironment(Environment):
                     control.joint_act,
                     self.dof_q_per_env,
                     self.dof_qd_per_env,
-                    self.num_contacts_per_env
+                    self.num_contacts_per_env,
+                    self.heading_quats,
                 ],
                 outputs=[cost, terminated],
                 device=self.device,
@@ -612,7 +654,8 @@ class AnymalEnvironment(Environment):
                     control.joint_act,
                     self.dof_q_per_env,
                     self.dof_qd_per_env,
-                    self.num_contacts_per_env
+                    self.num_contacts_per_env,
+                    self.heading_quats,
                 ],
                 outputs=[cost, terminated],
                 device=self.device,
@@ -665,6 +708,7 @@ class AnymalEnvironment(Environment):
                     self.basis_vec1,
                     self.dof_q_per_env,
                     self.dof_qd_per_env,
+                    self.heading_quats,
                 ],
                 outputs=[observations],
                 device=self.device,

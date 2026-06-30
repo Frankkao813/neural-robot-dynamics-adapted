@@ -323,7 +323,7 @@ class Environment:
             for i in trange(
                 self.num_envs, desc=f"Creating {self.num_envs} environments"
             ):
-                xform = wp.transform(self.env_offsets[i], wp.quat_identity())
+                xform = self.get_env_transform(i)
                 builder.add_builder(
                     articulation_builder,
                     xform,
@@ -414,6 +414,10 @@ class Environment:
             self.setup_renderer()
         
         self.extras = {}
+
+    def get_env_transform(self, env_id: int):
+        """Return the world transform used to instantiate one environment."""
+        return wp.transform(self.env_offsets[env_id], wp.quat_identity())
 
     def setup_renderer(self):
         if self.render_mode == RenderMode.OPENGL:

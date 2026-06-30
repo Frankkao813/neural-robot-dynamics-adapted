@@ -73,6 +73,18 @@ You can test an individual RL policy using the [`run_rl.py`](eval/eval_rl/run_rl
 cd eval/eval_rl
 python run_rl.py --rl-cfg ./cfg/Anymal/anymal_forward.yaml --playback ../../pretrained_models/RL_policies/Anymal/forward_walk/0/nn/AnymalPPO.pth --num-envs 1 --num-games 2 --env-mode [neural|ground-truth] [--render]
 ```
+
+To render two ANYmal robots that walk along their individual facing
+directions, run:
+
+```bash
+python run_rl.py --rl-cfg ./cfg/Anymal/anymal_two_directions.yaml --playback ../../pretrained_models/RL_policies/Anymal/forward_walk/0/nn/AnymalPPO.pth --render
+```
+
+Warp uses Y as the up axis in this project, so `0` degrees faces world +X and
+`-90` degrees faces world +Z (the second horizontal, or requested Y, direction).
+The environment converts each robot's observations and walking reward into its
+own heading frame, allowing the same forward-walking policy to control both.
 where `--env-mode` specifies to use NeRD dynamics or ground-truth analytical dynamics.
 
 To evaluate a batch of policies with different seeds in both ground-truth dynamics and NeRD dynamics (as done in Table 1 in the paper), you can run the batch evaluation script with the batch evaluation config file:
