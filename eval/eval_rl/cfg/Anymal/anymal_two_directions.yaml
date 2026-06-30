@@ -12,8 +12,14 @@ env:
     task: forward
     random_reset: false
     camera_tracking: false
-    # Warp is Y-up: 0 faces +X and -pi/2 faces +Z.
-    heading_yaws: [0.0, -1.5707963267948966]
+    # Explicit Warp coordinates. Warp Y is vertical, so the usual horizontal
+    # Y coordinate is represented here by Warp Z.
+    env_positions:
+      - [10.0, 0.0, 0.0]
+      - [0.0, 0.0, 10.0]
+    # Robot 1 faces -X. Robot 2 faces Warp -Z, corresponding to
+    # conventional -Y on the horizontal plane.
+    heading_yaws: [3.141592653589793, 1.5707963267948966]
 
 rl:
   config:

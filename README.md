@@ -85,6 +85,8 @@ Warp uses Y as the up axis in this project, so `0` degrees faces world +X and
 `-90` degrees faces world +Z (the second horizontal, or requested Y, direction).
 The environment converts each robot's observations and walking reward into its
 own heading frame, allowing the same forward-walking policy to control both.
+Exact spawn locations can be configured with one Warp `(X, Y, Z)` position per
+robot under `warp_env_cfg.env_positions`; Y is the vertical coordinate.
 where `--env-mode` specifies to use NeRD dynamics or ground-truth analytical dynamics.
 
 To evaluate a batch of policies with different seeds in both ground-truth dynamics and NeRD dynamics (as done in Table 1 in the paper), you can run the batch evaluation script with the batch evaluation config file:

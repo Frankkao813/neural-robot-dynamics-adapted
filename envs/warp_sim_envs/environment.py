@@ -264,6 +264,7 @@ class Environment:
         integrator_type: IntegratorType = None,
         render_mode: RenderMode = None,
         env_offset: Tuple[float, float, float] = None,
+        env_positions: List[Tuple[float, float, float]] = None,
         device: wp.context.Devicelike = None,
         requires_grad: bool = False,
         profile: bool = False,
@@ -312,6 +313,15 @@ class Environment:
         self.env_offsets = compute_env_offsets(
             self.num_envs, self.env_offset, self.up_axis
         )
+        if env_positions is not None:
+            env_positions = np.asarray(env_positions, dtype=np.float32)
+            expected_shape = (self.num_envs, 3)
+            if env_positions.shape != expected_shape:
+                raise ValueError(
+                    f"env_positions must have shape {expected_shape}, "
+                    f"got {env_positions.shape}"
+                )
+            self.env_offsets = env_positions
         self.env_offsets_wp = wp.array(
             self.env_offsets, dtype=wp.vec3, device=self.device
         )
