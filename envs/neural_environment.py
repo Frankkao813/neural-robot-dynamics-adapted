@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import math
 import sys, os
 base_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
 sys.path.append(base_dir)
@@ -148,6 +150,7 @@ class NeuralEnvironment():
             -torch.inf, 
             device = self.torch_device
         )
+        self._trace_step_env = None
 
         # video writer
         self.export_video = False
@@ -328,6 +331,132 @@ class NeuralEnvironment():
 
     def set_eval_collisions(self, eval_collisions):
         self.env.set_eval_collisions(eval_collisions)
+
+    def enable_one_step_trace(self, env_id=0):
+        """Print one state -> control -> next-state transition."""
+        if self.robot_name != "AnyMAL":
+            raise ValueError("One-step tracing currently supports the ANYmal environment.")
+        if not 0 <= env_id < self.num_envs:
+            raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
+        self._trace_step_env = env_id
+
+    @staticmethod
+    def _quat_conjugate(quat):
+        result = quat.clone()
+        result[:3] = -result[:3]
+        return result
+
+    @staticmethod
+    def _quat_multiply(lhs, rhs):
+        lx, ly, lz, lw = lhs
+        rx, ry, rz, rw = rhs
+        return torch.stack(
+            (
+                lw * rx + lx * rw + ly * rz - lz * ry,
+                lw * ry - lx * rz + ly * rw + lz * rx,
+                lw * rz + lx * ry - ly * rx + lz * rw,
+                lw * rw - lx * rx - ly * ry - lz * rz,
+            )
+        )
+
+    @classmethod
+    def _quat_rotate(cls, quat, vector):
+        vector_quat = torch.cat(
+            (vector, torch.zeros(1, dtype=vector.dtype, device=vector.device))
+        )
+        return cls._quat_multiply(
+            cls._quat_multiply(quat, vector_quat),
+            cls._quat_conjugate(quat),
+        )[:3]
+
+    def _trace_anymal_transition(self, state, actions, joint_acts, next_state):
+        """Format the quantities used by ANYmal's policy and dynamics."""
+        env_id = self._trace_step_env
+        q_dim = self.dof_q_per_env
+        dt = self.frame_dt
+
+        q = state[:q_dim]
+        qd = state[q_dim:]
+        next_q = next_state[:q_dim]
+        next_qd = next_state[q_dim:]
+
+        heading_yaw = float(self.env.heading_yaws[env_id])
+        half_yaw = 0.5 * heading_yaw
+        heading_quat = q.new_tensor(
+            [0.0, math.sin(half_yaw), 0.0, math.cos(half_yaw)]
+        )
+        heading_inv = self._quat_conjugate(heading_quat)
+
+        def physical_velocity(root_q, root_qd):
+            angular_world = root_qd[:3]
+            linear_world = root_qd[3:6] - torch.cross(
+                root_q[:3], angular_world, dim=0
+            )
+            return angular_world, linear_world
+
+        angular, linear = physical_velocity(q, qd)
+        next_angular, next_linear = physical_velocity(next_q, next_qd)
+        local_angular = self._quat_rotate(heading_inv, angular)
+        local_linear = self._quat_rotate(heading_inv, linear)
+
+        if self.env.task == "forward":
+            target_linear = q.new_tensor([1.0, 0.0, 0.0])
+        elif self.env.task == "side":
+            target_linear = q.new_tensor([0.0, 0.0, 1.0])
+        else:
+            target_linear = q.new_zeros(3)
+        target_yaw_rate = q.new_tensor(0.0)
+
+        trace = {
+            "environment": env_id,
+            "mode": self.env_mode,
+            "dt_seconds": dt,
+            "target": {
+                "meaning": "velocity target in configured heading frame",
+                "heading_yaw_degrees": math.degrees(heading_yaw),
+                "linear_velocity": target_linear.tolist(),
+                "yaw_rate": target_yaw_rate.item(),
+            },
+            "current_pose_world": {
+                "position": q[:3].tolist(),
+                "quaternion_xyzw": q[3:7].tolist(),
+            },
+            "current_velocity_heading_frame": {
+                "linear": local_linear.tolist(),
+                "angular": local_angular.tolist(),
+            },
+            "tracking_error_target_minus_current": {
+                "linear_velocity": (target_linear - local_linear).tolist(),
+                "yaw_rate": (target_yaw_rate - local_angular[1]).item(),
+            },
+            "control_output": {
+                "policy_action": actions.tolist(),
+                "applied_joint_torque": joint_acts.tolist(),
+            },
+            "acceleration_world_finite_difference": {
+                "linear": ((next_linear - linear) / dt).tolist(),
+                "angular": ((next_angular - angular) / dt).tolist(),
+                "joint": ((next_qd[6:] - qd[6:]) / dt).tolist(),
+            },
+            "next_state": {
+                "position_world": next_q[:3].tolist(),
+                "quaternion_xyzw_world": next_q[3:7].tolist(),
+                "joint_positions": next_q[7:].tolist(),
+                "generalized_velocity": next_qd.tolist(),
+            },
+        }
+        if hasattr(self.env, "target_joint_q"):
+            trace["control_output"]["target_joint_position"] = (
+                wp.to_torch(self.env.target_joint_q)
+                .view(self.num_envs, -1)[env_id]
+                .detach()
+                .cpu()
+                .tolist()
+            )
+        print("\n[ONE-STEP TRACE]")
+        print(json.dumps(trace, indent=2))
+        print("[END ONE-STEP TRACE]\n")
+        self._trace_step_env = None
         
     '''
     Update states in neural env and keep the states in warp env synchronized.
@@ -370,6 +499,11 @@ class NeuralEnvironment():
         if env_mode is None:
             env_mode = self.default_env_mode
 
+        trace_env = self._trace_step_env
+        state_before = None
+        if trace_env is not None:
+            state_before = self.states[trace_env].detach().cpu().clone()
+
         # Update env mode
         self.set_env_mode(env_mode)
         # Convert actions to real values and copy to joint_act array in warp_env
@@ -392,6 +526,14 @@ class NeuralEnvironment():
 
         # Update states
         self._update_states()
+
+        if trace_env is not None:
+            self._trace_anymal_transition(
+                state_before,
+                actions[trace_env].detach().cpu(),
+                self.joint_acts[trace_env].detach().cpu(),
+                self.states[trace_env].detach().cpu(),
+            )
         
         # update debug info
         self.visited_state_min = torch.minimum(

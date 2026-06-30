@@ -76,6 +76,18 @@ def get_args():
              "For example, '--heading-yaws 0 -90' creates +X- and "
              "+Z-facing robots (the simulator uses Y-up coordinates).",
     )
+    parser.add_argument(
+        "--trace-step",
+        action="store_true",
+        help="Print one detailed ANYmal state/control transition during playback.",
+    )
+    parser.add_argument(
+        "--trace-step-env",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Environment index to inspect with --trace-step (default: 0).",
+    )
     parser.add_argument("--max-episode-length", 
                         default=None, 
                         type=int, 
@@ -223,6 +235,12 @@ def construct_env(env_specs, device, args):
         default_env_mode = env_specs["env_mode"],
         render = args.render
     )
+    if args.trace_step:
+        if not 0 <= args.trace_step_env < env.num_envs:
+            raise ValueError(
+                f"--trace-step-env must be in [0, {env.num_envs - 1}]"
+            )
+        env.enable_one_step_trace(args.trace_step_env)
 
     if neural_model is not None:
         assert env.robot_name == robot_name, \

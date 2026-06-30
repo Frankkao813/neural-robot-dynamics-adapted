@@ -89,6 +89,13 @@ Exact spawn locations can be configured with one Warp `(X, Y, Z)` position per
 robot under `warp_env_cfg.env_positions`; Y is the vertical coordinate.
 where `--env-mode` specifies to use NeRD dynamics or ground-truth analytical dynamics.
 
+To inspect one complete transition for either robot, add
+`--trace-step --trace-step-env 0` (or use environment `1`). The JSON trace
+prints the current pose, heading-frame velocity target and tracking error,
+policy action, target joint positions, applied joint torques, finite-difference
+acceleration, and next state. The configured position and heading are spawn
+conditions; the walking task tracks a velocity rather than a destination.
+
 To evaluate a batch of policies with different seeds in both ground-truth dynamics and NeRD dynamics (as done in Table 1 in the paper), you can run the batch evaluation script with the batch evaluation config file:
 ```
 python batch_eval_policy.py --num-envs 2048 --num-games 2048 --eval-cfg ./eval_cfg/Anymal/eval_cfg_side.yaml
