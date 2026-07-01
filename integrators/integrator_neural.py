@@ -163,6 +163,7 @@ class NeuralIntegrator(Integrator):
         """
         self.integrator_name = name
         self.torch_device = wp.device_to_torch(model.device)
+        self.print_model_io_env = None
         self.model = model
         self.neural_model = neural_model
         if neural_model is not None:
@@ -346,10 +347,28 @@ class NeuralIntegrator(Integrator):
         ):
             self.before_model_forward()
             # get the inputs for neural model
+            # tracing env
+            trace_env = self.print_model_io_env
             model_inputs = self.get_neural_model_inputs()
+
+            if trace_env is not None:
+                print(f"\nNeRD INPUT - environment {trace_env}")
+                for name, tensor in model_inputs.items():
+                    if isinstance(tensor, torch.Tensor):
+                        print(f"{name}: shape={tuple(tensor.shape)}")
+                        print(tensor[trace_env].detach().cpu())
             
             # compute the prediction using neural model, shape (num_envs, 1, dim)
             prediction = self.neural_model.evaluate(model_inputs)
+
+            if trace_env is not None:
+                print("shape of the prediction: ", tuple(prediction.shape))
+                print(f"\nNeRD OUTPUT — environment {trace_env}")
+                print(f"prediction: full shape={tuple(prediction.shape)}")
+                print(prediction[trace_env].detach().cpu())
+
+                # Prevent printing on subsequent steps
+                self.print_model_io_env = None
             
             # convert the prediction to next states
             cur_states = model_inputs["states"][:, -1, :]

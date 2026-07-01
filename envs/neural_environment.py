@@ -339,6 +339,7 @@ class NeuralEnvironment():
         if not 0 <= env_id < self.num_envs:
             raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
         self._trace_step_env = env_id
+        self.integrator_neural.print_model_io_env = env_id
 
     @staticmethod
     def _quat_conjugate(quat):
