@@ -334,8 +334,8 @@ class NeuralEnvironment():
 
     def enable_one_step_trace(self, env_id=0):
         """Print one state -> control -> next-state transition."""
-        if self.robot_name != "AnyMAL":
-            raise ValueError("One-step tracing currently supports the ANYmal environment.")
+        if self.robot_name not in ("AnyMAL", "Ant"):
+            raise ValueError("One-step tracing currently supports ANYmal and ANT.")
         if not 0 <= env_id < self.num_envs:
             raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
         self._trace_step_env = env_id
@@ -457,6 +457,116 @@ class NeuralEnvironment():
         print(json.dumps(trace, indent=2))
         print("[END ONE-STEP TRACE]\n")
         self._trace_step_env = None
+
+    def _trace_ant_transition(self, state, actions, joint_acts, next_state):
+        """Format the quantities used by ANT's policy and dynamics."""
+        env_id = self._trace_step_env
+        q_dim = self.dof_q_per_env
+        dt = self.frame_dt
+
+        q = state[:q_dim]
+        qd = state[q_dim:]
+        next_q = next_state[:q_dim]
+        next_qd = next_state[q_dim:]
+
+        def physical_velocity(root_q, root_qd):
+            angular_world = root_qd[:3]
+            linear_world = root_qd[3:6] - torch.cross(
+                root_q[:3], angular_world, dim=0
+            )
+            return angular_world, linear_world
+
+        angular, linear = physical_velocity(q, qd)
+        next_angular, next_linear = physical_velocity(next_q, next_qd)
+        up = self._quat_rotate(q[3:7], q.new_tensor([0.0, 0.0, 1.0]))
+        heading = self._quat_rotate(q[3:7], q.new_tensor([1.0, 0.0, 0.0]))
+
+        if self.env.task == "run":
+            target = {
+                "meaning": "maximize world +X velocity while upright and facing +X",
+                "finite_setpoint": False,
+                "direction_world": [1.0, 0.0, 0.0],
+            }
+            tracking_error = {
+                "meaning": "no finite velocity target; reward uses current forward speed",
+                "forward_velocity": linear[0].item(),
+            }
+        elif self.env.task == "spin":
+            target = {
+                "meaning": "maximize positive world-Y angular velocity while upright",
+                "finite_setpoint": False,
+                "axis_world": [0.0, 1.0, 0.0],
+            }
+            tracking_error = {
+                "meaning": "no finite angular-velocity target",
+                "spin_rate": angular[1].item(),
+            }
+        elif self.env.task == "spin_track":
+            target_angular = q.new_tensor([0.0, 5.0, 0.0])
+            target = {
+                "meaning": "track world-Y angular velocity while upright",
+                "finite_setpoint": True,
+                "angular_velocity_world": target_angular.tolist(),
+            }
+            tracking_error = {
+                "angular_velocity_target_minus_current": (
+                    target_angular - angular
+                ).tolist(),
+            }
+        else:
+            target = {"meaning": f"unknown ANT task: {self.env.task}"}
+            tracking_error = None
+
+        trace = {
+            "environment": env_id,
+            "robot": "Ant",
+            "task": self.env.task,
+            "mode": self.env_mode,
+            "dt_seconds": dt,
+            "target": target,
+            "current_pose_world": {
+                "position": q[:3].tolist(),
+                "quaternion_xyzw": q[3:7].tolist(),
+                "up_alignment_world_y": up[1].item(),
+                "heading_alignment_world_x": heading[0].item(),
+            },
+            "current_velocity_world": {
+                "linear": linear.tolist(),
+                "angular": angular.tolist(),
+            },
+            "tracking_error": tracking_error,
+            "control_output": {
+                "meaning": "torque = clamp(policy_action, limits) * control_gain",
+                "policy_action": actions.tolist(),
+                "control_gain": self.env.control_gains.tolist(),
+                "applied_joint_torque": joint_acts.tolist(),
+            },
+            "acceleration_world_finite_difference": {
+                "linear": ((next_linear - linear) / dt).tolist(),
+                "angular": ((next_angular - angular) / dt).tolist(),
+                "joint": ((next_qd[6:] - qd[6:]) / dt).tolist(),
+            },
+            "next_state": {
+                "position_world": next_q[:3].tolist(),
+                "quaternion_xyzw_world": next_q[3:7].tolist(),
+                "joint_positions": next_q[7:].tolist(),
+                "generalized_velocity": next_qd.tolist(),
+            },
+        }
+        print("\n[ONE-STEP TRACE]")
+        print(json.dumps(trace, indent=2))
+        print("[END ONE-STEP TRACE]\n")
+        self._trace_step_env = None
+
+    def _trace_transition(self, state, actions, joint_acts, next_state):
+        if self.robot_name == "AnyMAL":
+            self._trace_anymal_transition(
+                state, actions, joint_acts, next_state
+            )
+        elif self.robot_name == "Ant":
+            self._trace_ant_transition(
+                state, actions, joint_acts, next_state
+            )
         
     '''
     Update states in neural env and keep the states in warp env synchronized.
@@ -528,7 +638,7 @@ class NeuralEnvironment():
         self._update_states()
 
         if trace_env is not None:
-            self._trace_anymal_transition(
+            self._trace_transition(
                 state_before,
                 actions[trace_env].detach().cpu(),
                 self.joint_acts[trace_env].detach().cpu(),

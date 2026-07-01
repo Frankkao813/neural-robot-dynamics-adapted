@@ -95,6 +95,8 @@ prints the current pose, heading-frame velocity target and tracking error,
 policy action, target joint positions, applied joint torques, finite-difference
 acceleration, and next state. The configured position and heading are spawn
 conditions; the walking task tracks a velocity rather than a destination.
+The same flags support ANT run, spin, and spin-tracking policies; ANT traces
+show its direct action-to-torque mapping instead of ANYmal's joint PD targets.
 
 To evaluate a batch of policies with different seeds in both ground-truth dynamics and NeRD dynamics (as done in Table 1 in the paper), you can run the batch evaluation script with the batch evaluation config file:
 ```

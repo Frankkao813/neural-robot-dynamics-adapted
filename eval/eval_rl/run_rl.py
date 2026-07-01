@@ -79,7 +79,7 @@ def get_args():
     parser.add_argument(
         "--trace-step",
         action="store_true",
-        help="Print one detailed ANYmal state/control transition during playback.",
+        help="Print one detailed ANYmal or ANT transition during playback.",
     )
     parser.add_argument(
         "--trace-step-env",
