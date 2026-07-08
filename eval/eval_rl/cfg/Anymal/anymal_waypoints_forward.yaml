@@ -13,15 +13,12 @@ env:
     random_reset: false
     camera_tracking: true
     heading_yaws: [0.0]
-    waypoint_tolerance: 0.75
+    waypoint_tolerance: 0.5
     terminate_on_last_waypoint: true
     # Warp uses Y-up, so these are (X, Y, Z) waypoints on the ground plane.
     # This mirrors the Husky example path after mapping Husky's planar Y to Warp Z.
     waypoints:
-      - [2.0, 0.0, 1.0]
-      - [4.0, 0.0, 3.0]
-      - [2.0, 0.0, 5.0]
-      - [0.0, 0.0, 3.0]
+      - [2.0, 0.0, 0.0]
 
 rl:
   config:
