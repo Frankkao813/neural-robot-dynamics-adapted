@@ -19,6 +19,7 @@ import math
 import warp as wp
 import warp.sim
 import numpy as np
+import torch
 
 from envs.warp_sim_envs import Environment, IntegratorType
 
@@ -171,6 +172,16 @@ def anymal_side_cost(
             terminated[env_id] = True
         if torso_pos[1] < 0.4:
             terminated[env_id] = True
+
+
+@wp.kernel(enable_backward=False)
+def apply_extra_termination(
+    extra_terminated: wp.array(dtype=wp.bool),
+    terminated: wp.array(dtype=wp.bool),
+):
+    env_id = wp.tid()
+    if extra_terminated[env_id]:
+        terminated[env_id] = True
 
 @wp.kernel
 def compute_observations_anymal_simple(
@@ -451,6 +462,9 @@ class AnymalEnvironment(Environment):
         obs_type="dflex",
         camera_tracking=False,
         heading_yaws=None,
+        waypoints=None,
+        waypoint_tolerance=0.75,
+        terminate_on_last_waypoint=False,
         **kwargs
     ):
         self.seed = seed
@@ -459,6 +473,11 @@ class AnymalEnvironment(Environment):
         self.camera_tracking = camera_tracking
         self.task = task
         num_envs = kwargs.get("num_envs", self.num_envs)
+        self.waypoints = None
+        self.waypoint_tolerance = float(waypoint_tolerance)
+        self.terminate_on_last_waypoint = terminate_on_last_waypoint
+        self.current_waypoint_ids = np.zeros(num_envs, dtype=np.int32)
+        self.completed_waypoint_route = np.zeros(num_envs, dtype=bool)
         if heading_yaws is None:
             heading_yaws = [0.0] * num_envs
         if len(heading_yaws) != num_envs:
@@ -466,8 +485,35 @@ class AnymalEnvironment(Environment):
                 f"heading_yaws must contain one yaw per environment "
                 f"({num_envs} expected, got {len(heading_yaws)})"
             )
+        if waypoints is not None and num_envs != 1:
+            raise ValueError("Waypoint playback currently supports num_envs == 1 only.")
+        if waypoints is not None:
+            self.waypoints = self._format_waypoints(waypoints)
         self.heading_yaws = np.asarray(heading_yaws, dtype=np.float32)
         super().__init__(**kwargs)
+        self._sync_heading_quats()
+        self.waypoint_terminate_mask = wp.zeros(
+            self.num_envs, dtype=wp.bool, device=self.device
+        )
+        self.after_init()
+
+    @staticmethod
+    def _format_waypoints(waypoints):
+        formatted = []
+        for waypoint in waypoints:
+            if len(waypoint) == 2:
+                formatted.append([float(waypoint[0]), 0.0, float(waypoint[1])])
+            elif len(waypoint) == 3:
+                formatted.append([float(waypoint[0]), float(waypoint[1]), float(waypoint[2])])
+            else:
+                raise ValueError(
+                    "Each waypoint must have either 2 values (x, z) or 3 values (x, y, z)."
+                )
+        if not formatted:
+            raise ValueError("At least one waypoint is required when waypoint playback is enabled.")
+        return np.asarray(formatted, dtype=np.float32)
+
+    def _sync_heading_quats(self):
         self.heading_quats = wp.array(
             [
                 wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(yaw))
@@ -476,7 +522,72 @@ class AnymalEnvironment(Environment):
             dtype=wp.quat,
             device=self.device,
         )
-        self.after_init()
+
+    def _reset_waypoint_progress(self, env_ids=None):
+        if self.waypoints is None:
+            return
+        if env_ids is None:
+            self.current_waypoint_ids.fill(0)
+            self.completed_waypoint_route.fill(False)
+            wp.to_torch(self.waypoint_terminate_mask).zero_()
+            return
+
+        env_mask = env_ids.numpy()
+        self.current_waypoint_ids[env_mask] = 0
+        self.completed_waypoint_route[env_mask] = False
+        mask_tensor = wp.to_torch(self.waypoint_terminate_mask)
+        mask_tensor[env_mask] = False
+
+    def _update_waypoint_tracking(self, state: wp.sim.State):
+        if self.waypoints is None:
+            return
+
+        joint_q = wp.to_torch(state.joint_q).view(self.num_envs, -1)
+        terminate_mask = self.completed_waypoint_route.copy()
+        heading_changed = False
+
+        for env_id in range(self.num_envs):
+            if self.completed_waypoint_route[env_id]:
+                continue
+
+            pos_x = float(joint_q[env_id, 0])
+            pos_z = float(joint_q[env_id, 2])
+            waypoint_id = int(self.current_waypoint_ids[env_id])
+
+            while waypoint_id < len(self.waypoints):
+                target = self.waypoints[waypoint_id]
+                delta_x = float(target[0] - pos_x)
+                delta_z = float(target[2] - pos_z)
+                distance = math.hypot(delta_x, delta_z)
+                if distance > self.waypoint_tolerance:
+                    break
+                if waypoint_id == len(self.waypoints) - 1:
+                    self.completed_waypoint_route[env_id] = True
+                    terminate_mask[env_id] = self.terminate_on_last_waypoint
+                    print(f"[AnyMAL] Reached final waypoint {waypoint_id} at ({target[0]:.2f}, {target[2]:.2f}).")
+                    break
+                waypoint_id += 1
+                self.current_waypoint_ids[env_id] = waypoint_id
+                next_target = self.waypoints[waypoint_id]
+                print(f"[AnyMAL] Advancing to waypoint {waypoint_id} at ({next_target[0]:.2f}, {next_target[2]:.2f}).")
+
+            if self.completed_waypoint_route[env_id]:
+                continue
+
+            self.current_waypoint_ids[env_id] = waypoint_id
+            target = self.waypoints[waypoint_id]
+            delta_x = float(target[0] - pos_x)
+            delta_z = float(target[2] - pos_z)
+            desired_yaw = -math.atan2(delta_z, delta_x)
+            if not np.isclose(self.heading_yaws[env_id], desired_yaw):
+                self.heading_yaws[env_id] = desired_yaw
+                heading_changed = True
+
+        wp.to_torch(self.waypoint_terminate_mask).copy_(
+            torch.from_numpy(terminate_mask).to(device=wp.device_to_torch(self.device))
+        )
+        if heading_changed:
+            self._sync_heading_quats()
 
     def get_env_transform(self, env_id):
         heading = wp.quat_from_axis_angle(
@@ -565,6 +676,7 @@ class AnymalEnvironment(Environment):
     
     def reset_envs(self, env_ids: wp.array = None):
         """Reset environments where env_ids buffer indicates True. Resets all envs if env_ids is None."""
+        self._reset_waypoint_progress(env_ids)
         if self.task == "dataset":
             wp.launch(
                 reset_anymal_dataset,
@@ -626,6 +738,7 @@ class AnymalEnvironment(Environment):
     ):
         if not self.uses_generalized_coordinates:
             wp.sim.eval_ik(self.model, state, state.joint_q, state.joint_qd)
+        self._update_waypoint_tracking(state)
         if self.task == "forward":
             wp.launch(
                 anymal_forward_cost,
@@ -662,6 +775,14 @@ class AnymalEnvironment(Environment):
             )
         else:
             raise NotImplementedError
+        if self.waypoints is not None and self.terminate_on_last_waypoint:
+            wp.launch(
+                apply_extra_termination,
+                dim=self.num_envs,
+                inputs=[self.waypoint_terminate_mask],
+                outputs=[terminated],
+                device=self.device,
+            )
             
     @property
     def observation_dim(self):
@@ -684,6 +805,7 @@ class AnymalEnvironment(Environment):
         if not self.uses_generalized_coordinates:
             # evaluate generalized coordinates
             wp.sim.eval_ik(self.model, state, state.joint_q, state.joint_qd)
+        self._update_waypoint_tracking(state)
         if self.obs_type == "simple":
             wp.launch(
                 compute_observations_anymal_simple,
