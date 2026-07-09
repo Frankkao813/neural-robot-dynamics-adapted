@@ -20,7 +20,7 @@ env:
     # then make one 90-degree turn toward +Z.
     waypoints:
       - [2.0, 0.0, 0.0]
-      - [2.0, 0.0, 1.5]
+      - [4.95, 0.0, 0.52]
 
 rl:
   config:
