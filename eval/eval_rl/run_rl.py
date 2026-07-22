@@ -133,6 +133,23 @@ def get_args():
                         default = 'video.gif')
     parser.add_argument('--export-usd',
                         action = 'store_true')
+    parser.add_argument(
+        "--log-rollout",
+        action="store_true",
+        help="Log rollout state for one environment and save it after execution.",
+    )
+    parser.add_argument(
+        "--log-rollout-path",
+        type=str,
+        default="rollout_log.json",
+        help="Output path for rollout logging (.json or .csv).",
+    )
+    parser.add_argument(
+        "--log-rollout-env",
+        type=int,
+        default=0,
+        help="Environment index to log when --log-rollout is enabled.",
+    )
     
     args = parser.parse_args()
     
@@ -254,6 +271,12 @@ def construct_env(env_specs, device, args):
                 f"--trace-step-env must be in [0, {env.num_envs - 1}]"
             )
         env.enable_one_step_trace(args.trace_step_env)
+    if args.log_rollout:
+        if not 0 <= args.log_rollout_env < env.num_envs:
+            raise ValueError(
+                f"--log-rollout-env must be in [0, {env.num_envs - 1}]"
+            )
+        env.enable_rollout_logging(args.log_rollout_path, args.log_rollout_env)
 
     if neural_model is not None:
         assert env.robot_name == robot_name, \
@@ -395,6 +418,8 @@ if __name__ == '__main__':
         env.end_video_export()
     if args.playback is not None and args.export_usd:
         env.save_usd()
+    if args.log_rollout:
+        env.save_rollout_log(args.log_rollout_path)
     
     print('visited states range:')
     for i in range(len(env.visited_state_min)):

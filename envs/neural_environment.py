@@ -16,6 +16,7 @@
 import json
 import math
 import sys, os
+import csv
 base_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
 sys.path.append(base_dir)
 
@@ -157,6 +158,12 @@ class NeuralEnvironment():
         self.video_export_filename = None
         self.video_tmp_folder = None
         self.video_frame_cnt = 0
+        self._rollout_log_enabled = False
+        self._rollout_log_env = 0
+        self._rollout_log_step = 0
+        self._rollout_log_path = None
+        self._rollout_log_file = None
+        self._rollout_log_writer = None
 
     """ Expose functions in warp env """
     @property
@@ -568,6 +575,133 @@ class NeuralEnvironment():
             self._trace_ant_transition(
                 state, actions, joint_acts, next_state
             )
+
+    @staticmethod
+    def _quat_to_yaw_y_up(quat):
+        x, y, z, w = quat
+        sin_yaw = 2.0 * (w * y + x * z)
+        cos_yaw = 1.0 - 2.0 * (y * y + z * z)
+        return math.atan2(sin_yaw, cos_yaw)
+
+    def enable_rollout_logging(self, path, env_id=0):
+        if not 0 <= env_id < self.num_envs:
+            raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
+        output_path = Path(path)
+        if output_path.suffix.lower() != ".csv":
+            raise ValueError("Rollout streaming currently supports only CSV output.")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if self._rollout_log_file is not None:
+            self.disable_rollout_logging()
+
+        self._rollout_log_file = output_path.open("w", newline="", encoding="utf-8")
+        self._rollout_log_writer = csv.DictWriter(
+            self._rollout_log_file,
+            fieldnames=[
+                "step",
+                "env_id",
+                "x",
+                "y",
+                "z",
+                "body_yaw_world_rad",
+                "heading_yaw_rad",
+                "current_waypoint_id",
+                "target_x",
+                "target_y",
+                "target_z",
+                "quat_x",
+                "quat_y",
+                "quat_z",
+                "quat_w",
+            ],
+        )
+        self._rollout_log_writer.writeheader()
+        self._rollout_log_file.flush()
+        self._rollout_log_enabled = True
+        self._rollout_log_env = env_id
+        self._rollout_log_step = 0
+        self._rollout_log_path = output_path
+
+    def disable_rollout_logging(self):
+        self._rollout_log_enabled = False
+        if self._rollout_log_file is not None:
+            self._rollout_log_file.close()
+            self._rollout_log_file = None
+            self._rollout_log_writer = None
+
+    def _build_rollout_record(self, env_id):
+        state = self.states[env_id].detach().cpu()
+        q_dim = self.dof_q_per_env
+        q = state[:q_dim]
+        qd = state[q_dim:]
+        quat_xyzw = q[3:7].tolist()
+
+        record = {
+            "step": self._rollout_log_step,
+            "env_id": env_id,
+            "position_world": {
+                "x": float(q[0]),
+                "y": float(q[1]),
+                "z": float(q[2]),
+            },
+            "quaternion_xyzw_world": quat_xyzw,
+            "body_yaw_world_rad": self._quat_to_yaw_y_up(quat_xyzw),
+            "generalized_velocity": qd.tolist(),
+        }
+
+        if hasattr(self.env, "heading_yaws"):
+            record["heading_yaw_rad"] = float(self.env.heading_yaws[env_id])
+
+        if hasattr(self.env, "current_waypoint_ids"):
+            waypoint_id = int(self.env.current_waypoint_ids[env_id])
+            record["current_waypoint_id"] = waypoint_id
+            if getattr(self.env, "waypoints", None) is not None:
+                target = self.env.waypoints[waypoint_id]
+                record["target_waypoint"] = {
+                    "x": float(target[0]),
+                    "y": float(target[1]),
+                    "z": float(target[2]),
+                }
+
+        return record
+
+    def _append_rollout_record(self):
+        if not self._rollout_log_enabled:
+            return
+        record = self._build_rollout_record(self._rollout_log_env)
+        quat = record["quaternion_xyzw_world"]
+        target = record.get("target_waypoint") or {}
+        self._rollout_log_writer.writerow(
+            {
+                "step": record["step"],
+                "env_id": record["env_id"],
+                "x": record["position_world"]["x"],
+                "y": record["position_world"]["y"],
+                "z": record["position_world"]["z"],
+                "body_yaw_world_rad": record["body_yaw_world_rad"],
+                "heading_yaw_rad": record.get("heading_yaw_rad"),
+                "current_waypoint_id": record.get("current_waypoint_id"),
+                "target_x": target.get("x"),
+                "target_y": target.get("y"),
+                "target_z": target.get("z"),
+                "quat_x": quat[0],
+                "quat_y": quat[1],
+                "quat_z": quat[2],
+                "quat_w": quat[3],
+            }
+        )
+        self._rollout_log_file.flush()
+        self._rollout_log_step += 1
+
+    def save_rollout_log(self, path):
+        if self._rollout_log_path is None:
+            raise ValueError("Rollout logging was not enabled.")
+        if Path(path) != self._rollout_log_path:
+            raise ValueError(
+                f"Rollout log is streaming to {self._rollout_log_path}, not {path}."
+            )
+        self.disable_rollout_logging()
+        print_ok(f"Saved rollout log to {path}")
         
     '''
     Update states in neural env and keep the states in warp env synchronized.
@@ -637,6 +771,7 @@ class NeuralEnvironment():
 
         # Update states
         self._update_states()
+        self._append_rollout_record()
 
         if trace_env is not None:
             self._trace_transition(
@@ -710,6 +845,7 @@ class NeuralEnvironment():
         else:
             self.env.reset()
             self._update_states()
+        self._append_rollout_record()
         
         # special reset for neural integrator (e.g. clear states history)            
         self.integrator_neural.reset()
@@ -722,6 +858,8 @@ class NeuralEnvironment():
         """Resets all envs if env_ids is None."""
         self.env.reset_envs(env_ids)
         self._update_states()
+        if env_ids is None or env_ids.numpy()[self._rollout_log_env]:
+            self._append_rollout_record()
         # special reset for neural integrator (e.g. clear states history)  
         # TODO[Jie]: now reset for all envs together, need to be fixed.
         self.integrator_neural.reset()
