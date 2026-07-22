@@ -172,6 +172,15 @@ def load_rl_config(args):
     warp_env_cfg = rl_cfg['env'].setdefault('warp_env_cfg', {})
     if "waypoint_mode" in warp_env_cfg:
         warp_env_cfg["waypoints"] = generate_waypoints(warp_env_cfg)
+        # Remove some parameter that the repo doesn't support
+        for key in [
+            "waypoint_mode",
+            "num_waypoints",
+            "step_length",
+            "turn_angle_degree",
+            "radius",
+        ]:
+            warp_env_cfg.pop(key, None)
 
     if args.heading_yaws is not None:
         if args.num_envs is not None and args.num_envs != len(args.heading_yaws):
