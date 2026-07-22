@@ -168,6 +168,11 @@ def load_rl_config(args):
         rl_cfg['env']['model_path'] = args.nerd_model_path
     if args.num_envs is not None:
         rl_cfg['env']['num_envs'] = args.num_envs
+
+    warp_env_cfg = rl_cfg['env'].setdefault('warp_env_cfg', {})
+    if "waypoint_mode" in warp_env_cfg:
+        warp_env_cfg["waypoints"] = generate_waypoints(warp_env_cfg)
+
     if args.heading_yaws is not None:
         if args.num_envs is not None and args.num_envs != len(args.heading_yaws):
             parser_error = (
@@ -176,7 +181,6 @@ def load_rl_config(args):
             )
             raise ValueError(parser_error)
         rl_cfg['env']['num_envs'] = len(args.heading_yaws)
-        warp_env_cfg = rl_cfg['env'].setdefault('warp_env_cfg', {})
         warp_env_cfg['heading_yaws'] = [
             math.radians(yaw) for yaw in args.heading_yaws
         ]
@@ -308,6 +312,44 @@ def evaluate_policy(runner, policy_path):
         }
     )
     return results
+
+
+# Incremental polar stepping
+# This is often more useful for walking, because each new waypoint is built from the previous one:
+def generate_waypoints(cfg):
+    mode = cfg.get("waypoint_mode", "fixed_list")
+
+    if mode == "fixed_list":
+        if "waypoints" not in cfg:
+            raise ValueError(
+                "waypoint_mode='fixed_list' requires a 'waypoints' entry in warp_env_cfg."
+            )
+        if not cfg["waypoints"]:
+            raise ValueError(
+                "waypoint_mode='fixed_list' requires at least one waypoint."
+            )
+        return cfg["waypoints"]
+
+    if mode == "polar_turn":
+        num_waypoints = cfg.get("num_waypoints", 5)
+        step_length = cfg.get("step_length", 2.0)
+        angle_deg = cfg.get("turn_angle_degree", 10.0)
+        angle_step = math.radians(angle_deg)
+
+        x, z = 0.0, 0.0
+        heading = 0.0
+        waypoints = []
+
+        for _ in range(num_waypoints):
+            x += step_length * math.cos(heading)
+            z += step_length * math.sin(heading)
+            waypoints.append([x, z])
+            heading += angle_step
+
+        return waypoints
+
+    raise ValueError(f"Unknown waypoint_mode: {mode}")
+
 
 if __name__ == '__main__':
     args = get_args()
