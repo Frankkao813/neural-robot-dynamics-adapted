@@ -194,6 +194,7 @@ def load_rl_config(args):
             "waypoint_mode",
             "num_waypoints",
             "step_length",
+            "step_length_max",
             "turn_angle_degree",
             "radius",
         ]:
@@ -380,7 +381,28 @@ def generate_waypoints(cfg):
 
         return waypoints
 
-    raise ValueError(f"Unknown waypoint_mode: {mode}")
+    elif mode == "polar_random":
+        heading = 0.0
+        x, z = 0.0, 0.0
+
+        min_step = cfg.get("step_length", 1.0)
+        max_step = cfg.get("step_length_max", 3.0)
+        max_turn_rad = math.radians(10.0)
+
+        waypoints = []
+
+        for _ in range(num_waypoints):
+            delta_heading = (torch.rand(1).item() * 2.0 - 1.0) * max_turn_rad
+            heading += delta_heading
+
+            step = min_step + torch.rand(1).item() * (max_step - min_step)
+
+            x += step * math.cos(heading)
+            z += step * math.sin(heading)
+
+            waypoints.append([x, z])
+    else:
+        raise ValueError(f"Unknown waypoint_mode: {mode}")
 
 
 if __name__ == '__main__':
