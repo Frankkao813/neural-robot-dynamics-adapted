@@ -4,7 +4,7 @@ env:
   model_path: ../../pretrained_models/NeRD_models/Anymal/model/nn/model.pt
   num_envs: 1
 
-  max_episode_length: 600
+  max_episode_length: 800
   reward_bias: 0.
 
   warp_env_cfg:
