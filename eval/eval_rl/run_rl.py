@@ -460,6 +460,7 @@ def generate_waypoints(cfg):
         # Absolute headings relative to the global x-axis
         desired_angles_deg = torch.linspace(-30, 30, num_waypoints)
 
+        x, z = 0.0, 0.0
         for i in range(num_waypoints):
             step = min_step + torch.rand(1).item() * (max_step - min_step)
 
