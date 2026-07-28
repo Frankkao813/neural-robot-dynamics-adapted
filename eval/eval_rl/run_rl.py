@@ -16,6 +16,7 @@
 import os
 import sys
 import math
+from pathlib import Path
 
 base_dir = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../")
@@ -280,6 +281,11 @@ def construct_env(env_specs, device, args):
                 f"--log-rollout-env must be in [0, {env.num_envs - 1}]"
             )
         env.enable_rollout_logging(args.log_rollout_path, args.log_rollout_env)
+        contact_path = Path(args.log_rollout_path).with_suffix(".contacts.h5")
+        env.enable_contact_logging(
+            contact_path,
+            args.log_rollout_env,
+        )
 
     if neural_model is not None:
         assert env.robot_name == robot_name, \
@@ -486,6 +492,7 @@ if __name__ == '__main__':
         env.save_usd()
     if args.log_rollout:
         env.save_rollout_log(args.log_rollout_path)
+        env.disable_contact_logging()
     
     print('visited states range:')
     for i in range(len(env.visited_state_min)):

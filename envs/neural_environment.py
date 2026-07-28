@@ -41,6 +41,9 @@ from utils import warp_utils
 from utils.python_utils import print_info, print_ok, print_warning
 from utils.env_utils import create_abstract_contact_env
 
+
+import h5py
+
 class NeuralEnvironment():
     """
         Simulation environment wrapper that uses Neural Robot Dynamics Integrator.
@@ -164,6 +167,15 @@ class NeuralEnvironment():
         self._rollout_log_path = None
         self._rollout_log_file = None
         self._rollout_log_writer = None
+
+
+
+        # contact logger
+        self._contact_log_writer = None
+        self._contact_log_env = 0
+        self._contact_log_step = 0
+        self._contact_log_path = None
+
 
     """ Expose functions in warp env """
     @property
@@ -623,6 +635,47 @@ class NeuralEnvironment():
         self._rollout_log_step = 0
         self._rollout_log_path = output_path
 
+
+    def enable_contact_logging(self, output_path, env_id):
+        if self._contact_log_writer is not None:
+            self.disable_contact_logging()
+
+        self._contact_log_writer = h5py.File(output_path, "w")
+        self._contact_log_env = env_id
+        self._contact_log_step = 0
+        self._contact_log_path = Path(output_path)
+
+        contact = self._build_contact_record(env_id)
+        num_slots = len(contact["shape0"])
+
+        writer = self._contact_log_writer
+
+        # Fixed metadata: written once.
+        metadata = writer.create_group("metadata")
+        metadata.create_dataset("shape0", data=contact["shape0"])
+        metadata.create_dataset("shape1", data=contact["shape1"])
+        metadata.create_dataset("local_point0", data=contact["point0"])
+
+        # Per-step datasets: first dimension grows over time.
+        writer.create_dataset("step", shape=(0,), maxshape=(None,), dtype="i8")
+        writer.create_dataset(
+            "depth", shape=(0, num_slots),
+            maxshape=(None, num_slots), dtype="f4"
+        )
+        writer.create_dataset(
+            "normal", shape=(0, num_slots, 3),
+            maxshape=(None, num_slots, 3), dtype="f4"
+        )
+        writer.create_dataset(
+            "ground_point", shape=(0, num_slots, 3),
+            maxshape=(None, num_slots, 3), dtype="f4"
+        )
+
+    def disable_contact_logging(self):
+        if self._contact_log_writer is not None:
+            self._contact_log_writer.close()
+            self._contact_log_writer = None
+
     def disable_rollout_logging(self):
         self._rollout_log_enabled = False
         if self._rollout_log_file is not None:
@@ -666,6 +719,26 @@ class NeuralEnvironment():
 
         return record
 
+    def _build_contact_record(self, env_id):
+        if not 0 <= env_id < self.num_envs:
+            raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
+
+        model = self.model
+        slots_per_env = self.num_contacts_per_env
+        start = env_id * slots_per_env
+        end = start + slots_per_env
+
+        return {
+            "env_id": env_id,
+            "shape0": wp.to_torch(model.rigid_contact_shape0)[start:end].cpu().numpy().copy(),
+            "shape1": wp.to_torch(model.rigid_contact_shape1)[start:end].cpu().numpy().copy(),
+            "point0": wp.to_torch(model.rigid_contact_point0)[start:end].cpu().numpy().copy(),
+            "point1": wp.to_torch(model.rigid_contact_point1)[start:end].cpu().numpy().copy(),
+            "normal": wp.to_torch(model.rigid_contact_normal)[start:end].cpu().numpy().copy(),
+            "depth": wp.to_torch(model.rigid_contact_depth)[start:end].cpu().numpy().copy(),
+        }
+
+
     def _append_rollout_record(self):
         if not self._rollout_log_enabled:
             return
@@ -691,8 +764,31 @@ class NeuralEnvironment():
                 "quat_w": quat[3],
             }
         )
+
+
+
         self._rollout_log_file.flush()
         self._rollout_log_step += 1
+
+
+    def _append_contact_record(self):
+        if self._contact_log_writer is None:
+            return
+
+        contact = self._build_contact_record(self._contact_log_env)
+        writer = self._contact_log_writer
+        row = writer["step"].shape[0]
+
+        for name in ("step", "depth", "normal", "ground_point"):
+            writer[name].resize(row + 1, axis=0)
+
+        writer["step"][row] = self._rollout_log_step - 1
+        writer["depth"][row] = contact["depth"]
+        writer["normal"][row] = contact["normal"]
+        writer["ground_point"][row] = contact["point1"]
+
+        self._contact_log_step += 1
+        writer.flush()
 
     def save_rollout_log(self, path):
         if self._rollout_log_path is None:
@@ -773,6 +869,7 @@ class NeuralEnvironment():
         # Update states
         self._update_states()
         self._append_rollout_record()
+        self._append_contact_record()
 
         if trace_env is not None:
             self._trace_transition(
@@ -830,6 +927,9 @@ class NeuralEnvironment():
 
         # Update states
         self._update_states()
+        # Append rollout and contact records
+        self._append_rollout_record()
+        self._append_contact_record()
 
         return self.states
 
