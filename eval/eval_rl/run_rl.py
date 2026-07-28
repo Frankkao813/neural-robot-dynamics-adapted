@@ -451,6 +451,27 @@ def generate_waypoints(cfg):
             waypoints.append([x, z])
         print("Generated zigzag waypoints:", waypoints)
         return waypoints
+    elif mode == "curvy_line":
+        num_waypoints = cfg.get("num_waypoints", 5)
+
+        min_step = cfg.get("step_length", 1.0)
+        max_step = cfg.get("step_length_max", 3.0)
+
+        # Absolute headings relative to the global x-axis
+        desired_angles_deg = torch.linspace(-30, 30, num_waypoints)
+
+        for i in range(num_waypoints):
+            step = min_step + torch.rand(1).item() * (max_step - min_step)
+
+            angle_rad = math.radians(desired_angles_deg[i].item())
+
+            x += step * math.cos(angle_rad)
+            z += step * math.sin(angle_rad)
+
+            waypoints.append([x, z])
+
+        return waypoints
+
     else:
         raise ValueError(f"Unknown waypoint_mode: {mode}")
 
