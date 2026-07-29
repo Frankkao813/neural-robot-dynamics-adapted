@@ -4,7 +4,7 @@ env:
   model_path: ../../pretrained_models/NeRD_models/Anymal/model/nn/model.pt
   num_envs: 1
 
-  max_episode_length: 800
+  max_episode_length: 1000
   reward_bias: 0.
 
   warp_env_cfg:
@@ -17,7 +17,7 @@ env:
     step_length: 1.0
     step_length_max: 3.0
     # WP0 starts at -10 degrees; each later segment adds 10 degrees.
-    curvy_start_angle_degree: -10.0
+    curvy_start_angle_degree: -30.0
     curvy_angle_step_degree: 10.0
     # Avoid switching targets while the robot is still far from a corner.
     waypoint_tolerance: 0.35

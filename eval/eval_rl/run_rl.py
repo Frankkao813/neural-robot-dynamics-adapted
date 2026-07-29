@@ -454,7 +454,7 @@ def generate_waypoints(cfg):
         print("Generated zigzag waypoints:", waypoints)
         return waypoints
     elif mode == "curvy_line":
-        num_waypoints = cfg.get("num_waypoints", 5)
+        num_waypoints = cfg.get("num_waypoints", 10)
 
         min_step = cfg.get("step_length", 1.0)
         max_step = cfg.get("step_length_max", 3.0)
