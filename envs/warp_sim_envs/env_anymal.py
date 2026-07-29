@@ -467,6 +467,11 @@ class AnymalEnvironment(Environment):
         terminate_on_last_waypoint=False,
         startup_heading_hold_seconds=0.0,
         startup_heading_ramp_seconds=0.0,
+        waypoint_heading_step_degrees=None,
+        waypoint_heading_stage_ramp_seconds=0.0,
+        waypoint_heading_settle_seconds=0.0,
+        waypoint_heading_min_torso_height=0.0,
+        waypoint_heading_max_angular_speed=float("inf"),
         **kwargs
     ):
         self.seed = seed
@@ -483,6 +488,20 @@ class AnymalEnvironment(Environment):
         self.startup_heading_ramp_seconds = float(startup_heading_ramp_seconds)
         if self.startup_heading_hold_seconds < 0.0 or self.startup_heading_ramp_seconds < 0.0:
             raise ValueError("Startup heading hold and ramp durations must be non-negative.")
+        self.waypoint_heading_step_radians = None
+        if waypoint_heading_step_degrees is not None:
+            step_degrees = float(waypoint_heading_step_degrees)
+            if not 0.0 < step_degrees <= 180.0:
+                raise ValueError("waypoint_heading_step_degrees must be in (0, 180].")
+            self.waypoint_heading_step_radians = math.radians(step_degrees)
+        self.waypoint_heading_stage_ramp_seconds = float(waypoint_heading_stage_ramp_seconds)
+        self.waypoint_heading_settle_seconds = float(waypoint_heading_settle_seconds)
+        self.waypoint_heading_min_torso_height = float(waypoint_heading_min_torso_height)
+        self.waypoint_heading_max_angular_speed = float(waypoint_heading_max_angular_speed)
+        if self.waypoint_heading_stage_ramp_seconds < 0.0 or self.waypoint_heading_settle_seconds < 0.0:
+            raise ValueError("Waypoint heading ramp and settle durations must be non-negative.")
+        if self.waypoint_heading_min_torso_height < 0.0 or self.waypoint_heading_max_angular_speed < 0.0:
+            raise ValueError("Waypoint heading stability thresholds must be non-negative.")
         self.current_waypoint_ids = np.zeros(num_envs, dtype=np.int32)
         self.completed_waypoint_route = np.zeros(num_envs, dtype=bool)
         self.waypoint_start_times = np.full(num_envs, -1.0, dtype=np.float64)
@@ -499,6 +518,10 @@ class AnymalEnvironment(Environment):
             self.waypoints = self._format_waypoints(waypoints)
         self.heading_yaws = np.asarray(heading_yaws, dtype=np.float32)
         self.initial_heading_yaws = self.heading_yaws.copy()
+        self.waypoint_heading_stage_start_yaws = self.heading_yaws.copy()
+        self.waypoint_heading_stage_target_yaws = self.heading_yaws.copy()
+        self.waypoint_heading_stage_start_times = np.full(num_envs, -1.0, dtype=np.float64)
+        self.waypoint_heading_stable_since = np.full(num_envs, -1.0, dtype=np.float64)
         super().__init__(**kwargs)
         self._sync_heading_quats()
         self.waypoint_terminate_mask = wp.zeros(
@@ -532,6 +555,71 @@ class AnymalEnvironment(Environment):
             device=self.device,
         )
 
+    @staticmethod
+    def _wrap_to_pi(angle):
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _reset_heading_stages(self, env_mask):
+        self.waypoint_heading_stage_start_yaws[env_mask] = self.initial_heading_yaws[env_mask]
+        self.waypoint_heading_stage_target_yaws[env_mask] = self.initial_heading_yaws[env_mask]
+        self.waypoint_heading_stage_start_times[env_mask] = -1.0
+        self.waypoint_heading_stable_since[env_mask] = -1.0
+
+    def _clear_heading_stage(self, env_id):
+        current_yaw = self.heading_yaws[env_id]
+        self.waypoint_heading_stage_start_yaws[env_id] = current_yaw
+        self.waypoint_heading_stage_target_yaws[env_id] = current_yaw
+        self.waypoint_heading_stage_start_times[env_id] = -1.0
+        self.waypoint_heading_stable_since[env_id] = -1.0
+
+    def _begin_heading_stage(self, env_id, goal_yaw):
+        start_yaw = float(self.heading_yaws[env_id])
+        yaw_error = self._wrap_to_pi(goal_yaw - start_yaw)
+        step = min(abs(yaw_error), self.waypoint_heading_step_radians)
+        target_yaw = start_yaw + math.copysign(step, yaw_error)
+        self.waypoint_heading_stage_start_yaws[env_id] = start_yaw
+        self.waypoint_heading_stage_target_yaws[env_id] = target_yaw
+        self.waypoint_heading_stage_start_times[env_id] = self.sim_time
+        self.waypoint_heading_stable_since[env_id] = -1.0
+        return start_yaw
+
+    def _staged_waypoint_heading(self, env_id, goal_yaw, torso_height, angular_speed):
+        """Advance a waypoint heading in bounded stages after a stable dwell."""
+        if self.waypoint_heading_stage_start_times[env_id] < 0.0:
+            return self._begin_heading_stage(env_id, goal_yaw)
+
+        stage_elapsed = self.sim_time - self.waypoint_heading_stage_start_times[env_id]
+        if self.waypoint_heading_stage_ramp_seconds > 0.0:
+            ramp_fraction = min(1.0, stage_elapsed / self.waypoint_heading_stage_ramp_seconds)
+        else:
+            ramp_fraction = 1.0
+
+        stage_start = float(self.waypoint_heading_stage_start_yaws[env_id])
+        stage_target = float(self.waypoint_heading_stage_target_yaws[env_id])
+        stage_delta = self._wrap_to_pi(stage_target - stage_start)
+        command_yaw = stage_start + ramp_fraction * stage_delta
+
+        if ramp_fraction < 1.0:
+            return command_yaw
+
+        is_stable = (
+            torso_height >= self.waypoint_heading_min_torso_height
+            and angular_speed <= self.waypoint_heading_max_angular_speed
+        )
+        if not is_stable:
+            self.waypoint_heading_stable_since[env_id] = -1.0
+            return command_yaw
+
+        if self.waypoint_heading_stable_since[env_id] < 0.0:
+            self.waypoint_heading_stable_since[env_id] = self.sim_time
+            return command_yaw
+
+        stable_elapsed = self.sim_time - self.waypoint_heading_stable_since[env_id]
+        goal_error = self._wrap_to_pi(goal_yaw - command_yaw)
+        if stable_elapsed >= self.waypoint_heading_settle_seconds and abs(goal_error) > math.radians(1.0):
+            return self._begin_heading_stage(env_id, goal_yaw)
+        return command_yaw
+
     def _reset_waypoint_progress(self, env_ids=None):
         if self.waypoints is None:
             return
@@ -540,6 +628,7 @@ class AnymalEnvironment(Environment):
             self.completed_waypoint_route.fill(False)
             self.waypoint_start_times.fill(-1.0)
             self.heading_yaws[:] = self.initial_heading_yaws
+            self._reset_heading_stages(np.ones(self.num_envs, dtype=bool))
             wp.to_torch(self.waypoint_terminate_mask).zero_()
             self._sync_heading_quats()
             return
@@ -554,6 +643,7 @@ class AnymalEnvironment(Environment):
         self.completed_waypoint_route[env_mask] = False
         self.waypoint_start_times[env_mask] = -1.0
         self.heading_yaws[env_mask] = self.initial_heading_yaws[env_mask]
+        self._reset_heading_stages(env_mask)
         mask_tensor = wp.to_torch(self.waypoint_terminate_mask)
         mask_tensor[env_mask] = False
         self._sync_heading_quats()
@@ -563,6 +653,7 @@ class AnymalEnvironment(Environment):
             return
 
         joint_q = wp.to_torch(state.joint_q).view(self.num_envs, -1)
+        joint_qd = wp.to_torch(state.joint_qd).view(self.num_envs, -1)
         terminate_mask = self.completed_waypoint_route.copy()
         heading_changed = False
 
@@ -591,6 +682,7 @@ class AnymalEnvironment(Environment):
                     break
                 waypoint_id += 1
                 self.current_waypoint_ids[env_id] = waypoint_id
+                self._clear_heading_stage(env_id)
                 next_target = self.waypoints[waypoint_id]
                 print(f"[AnyMAL] Advancing to waypoint {waypoint_id} at ({next_target[0]:.2f}, {next_target[2]:.2f}).")
 
@@ -609,7 +701,16 @@ class AnymalEnvironment(Environment):
             elapsed_seconds = max(
                 0.0, self.sim_time - self.waypoint_start_times[env_id]
             )
-            if waypoint_id == 0:
+            if self.waypoint_heading_step_radians is not None:
+                if elapsed_seconds < self.startup_heading_hold_seconds:
+                    desired_yaw = float(self.initial_heading_yaws[env_id])
+                else:
+                    torso_height = float(joint_q[env_id, 1])
+                    angular_speed = float(torch.linalg.vector_norm(joint_qd[env_id, :3]))
+                    desired_yaw = self._staged_waypoint_heading(
+                        env_id, desired_yaw, torso_height, angular_speed
+                    )
+            elif waypoint_id == 0:
                 if elapsed_seconds < self.startup_heading_hold_seconds:
                     print(f"[AnyMAL] Holding initial heading for {self.startup_heading_hold_seconds:.2f}s (elapsed {elapsed_seconds:.2f}s).")
                     desired_yaw = float(self.initial_heading_yaws[env_id])
