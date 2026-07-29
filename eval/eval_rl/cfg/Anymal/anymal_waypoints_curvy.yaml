@@ -25,7 +25,7 @@ env:
     waypoint_heading_stage_ramp_seconds: 0.25
     waypoint_heading_settle_seconds: 0.4
     waypoint_heading_min_torso_height: 0.60
-    waypoint_heading_max_angular_speed: 1.5
+    # waypoint_heading_max_angular_speed: 1.5
     terminate_on_last_waypoint: true
 
 rl:
