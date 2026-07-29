@@ -456,9 +456,14 @@ def generate_waypoints(cfg):
 
         min_step = cfg.get("step_length", 1.0)
         max_step = cfg.get("step_length_max", 3.0)
+        start_angle_deg = cfg.get("curvy_start_angle_degree", -10.0)
+        angle_step_deg = cfg.get("curvy_angle_step_degree", 10.0)
 
-        # Absolute headings relative to the global x-axis
-        desired_angles_deg = torch.linspace(-30, 30, num_waypoints)
+        # Absolute segment headings relative to the global x-axis.  The
+        # default sequence is -10, 0, 10, 20, 30 degrees for five waypoints.
+        desired_angles_deg = start_angle_deg + angle_step_deg * torch.arange(
+            num_waypoints, dtype=torch.float32
+        )
         waypoints = []
 
         x, z = 0.0, 0.0

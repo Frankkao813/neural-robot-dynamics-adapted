@@ -16,12 +16,15 @@ env:
     waypoint_mode: curvy_line
     step_length: 1.0
     step_length_max: 3.0
+    # WP0 starts at -10 degrees; each later segment adds 10 degrees.
+    curvy_start_angle_degree: -10.0
+    curvy_angle_step_degree: 10.0
     # Avoid switching targets while the robot is still far from a corner.
     waypoint_tolerance: 0.35
-    # Hold at reset, then pursue each target in 15-degree stages.
+    # Hold at reset, then pursue each target in 10-degree stages.
     startup_heading_hold_seconds: 0.5
     startup_heading_ramp_seconds: 0.0
-    waypoint_heading_step_degrees: 15.0
+    waypoint_heading_step_degrees: 10.0
     waypoint_heading_stage_ramp_seconds: 0.25
     waypoint_heading_settle_seconds: 0.4
     waypoint_heading_min_torso_height: 0.60
