@@ -200,6 +200,8 @@ def load_rl_config(args):
             "zigzag_angle_degree",
             "zigzag_turn_degree",
             "radius",
+            "curvy_start_angle_degree",
+            "curvy_angle_step_degree",
         ]:
             warp_env_cfg.pop(key, None)
 
