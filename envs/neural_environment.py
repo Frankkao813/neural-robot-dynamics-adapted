@@ -643,7 +643,8 @@ class NeuralEnvironment():
                 "quat_w",
                 "forward_x_world",
                 "forward_z_world",
-                "forward_yaw_world_rad"
+                "forward_yaw_world_rad",
+                "root_euler_yaw_world_rad"
             ],
         )
         self._rollout_log_writer.writeheader()
@@ -721,9 +722,10 @@ class NeuralEnvironment():
         )
 
 
-        body_yaw = self._quat_to_yaw_y_up(quat_xyzw)
+        body_yaw = forward_yaw
         # The root generalized velocity stores world angular velocity first;
         # Y is the yaw axis in this simulator's Y-up convention.
+        root_euler_yaw_world = self._quat_to_yaw_y_up(quat)
         body_yaw_rate = float(qd[1])
 
         record = {
@@ -742,6 +744,7 @@ class NeuralEnvironment():
             "forward_x_world": float(forward_world[0]),
             "forward_z_world": float(forward_world[2]),
             "forward_yaw_world_rad": forward_yaw,
+            "root_euler_yaw_world_rad": root_euler_yaw_world,  # optional
         }
 
         if hasattr(self.env, "heading_yaws"):
@@ -849,6 +852,8 @@ class NeuralEnvironment():
                 "forward_x_world": record.get("forward_x_world"),
                 "forward_z_world": record.get("forward_z_world"),
                 "forward_yaw_world_rad": record.get("forward_yaw_world_rad"),
+                "root_euler_yaw_world_rad": record.get("root_euler_yaw_world"),  # optional
+
             }
         )
 
