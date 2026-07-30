@@ -641,6 +641,9 @@ class NeuralEnvironment():
                 "quat_y",
                 "quat_z",
                 "quat_w",
+                "forward_x_world",
+                "forward_z_world",
+                "forward_yaw_world_rad"
             ],
         )
         self._rollout_log_writer.writeheader()
@@ -704,6 +707,20 @@ class NeuralEnvironment():
         q = state[:q_dim]
         qd = state[q_dim:]
         quat_xyzw = q[3:7].tolist()
+
+        quat = q[3:7]
+
+        forward_world = self._quat_rotate(
+            quat,
+            q.new_tensor([1.0, 0.0, 0.0])   # local body +X
+        )
+
+        forward_yaw = math.atan2(
+            -float(forward_world[2]),
+            float(forward_world[0]),
+        )
+
+
         body_yaw = self._quat_to_yaw_y_up(quat_xyzw)
         # The root generalized velocity stores world angular velocity first;
         # Y is the yaw axis in this simulator's Y-up convention.
@@ -722,6 +739,9 @@ class NeuralEnvironment():
             "body_yaw_rate_world_rad_s": body_yaw_rate,
             "torso_height_m": float(q[1]),
             "generalized_velocity": qd.tolist(),
+            "forward_x_world": float(forward_world[0]),
+            "forward_z_world": float(forward_world[2]),
+            "forward_yaw_world_rad": forward_yaw,
         }
 
         if hasattr(self.env, "heading_yaws"):
@@ -826,6 +846,9 @@ class NeuralEnvironment():
                 "quat_y": quat[1],
                 "quat_z": quat[2],
                 "quat_w": quat[3],
+                "forward_x_world": record.get("forward_x_world"),
+                "forward_z_world": record.get("forward_z_world"),
+                "forward_yaw_world_rad": record.get("forward_yaw_world_rad"),
             }
         )
 
