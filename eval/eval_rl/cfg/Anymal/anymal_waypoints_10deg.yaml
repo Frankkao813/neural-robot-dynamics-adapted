@@ -4,7 +4,7 @@ env:
   model_path: ../../pretrained_models/NeRD_models/Anymal/model/nn/model.pt
   num_envs: 1
 
-  max_episode_length: 600
+  max_episode_length: 800
   reward_bias: 0.
 
   warp_env_cfg:
@@ -19,8 +19,12 @@ env:
     # This is the next step after the single forward waypoint: walk forward,
     # then make one 90-degree turn toward +Z.
     waypoints:
-      - [2.0, 0.0, 0.0]
-      - [4.95, 0.0, 0.52]
+      - [2.0000, 0.0, 0.0000]   # 0°
+      - [3.9696, 0.0, 0.3473]   # + 2cos(10°), 2sin(10°)
+      - [5.8489, 0.0, 1.0313]   # + 2cos(20°), 2sin(20°)
+      - [7.5809, 0.0, 2.0313]   # + 2cos(30°), 2sin(30°)
+      - [9.1130, 0.0, 3.3169]   # + 2cos(40°), 2sin(40°)
+      - [10.3986, 0.0, 4.8490]  # + 2cos(50°), 2sin(50°)
 
 rl:
   config:
