@@ -41,10 +41,18 @@ from utils import warp_utils
 from utils.python_utils import print_info, print_ok, print_warning
 from utils.env_utils import create_abstract_contact_env
 
+
+import h5py
+
 class NeuralEnvironment():
     """
         Simulation environment wrapper that uses Neural Robot Dynamics Integrator.
     """
+
+    # A diagnostic threshold only.  It does not alter waypoint control; it
+    # merely makes the rollout log state whether the torso is aligned with the
+    # currently commanded heading reference.
+    ROLLOUT_BODY_YAW_TOLERANCE_RAD = math.radians(3.0)
     def __init__(
         self,
         # warp environment arguments
@@ -164,6 +172,15 @@ class NeuralEnvironment():
         self._rollout_log_path = None
         self._rollout_log_file = None
         self._rollout_log_writer = None
+
+
+
+        # contact logger
+        self._contact_log_writer = None
+        self._contact_log_env = 0
+        self._contact_log_step = 0
+        self._contact_log_path = None
+
 
     """ Expose functions in warp env """
     @property
@@ -584,6 +601,10 @@ class NeuralEnvironment():
         cos_yaw = 1.0 - 2.0 * (y * y + z * z)
         return math.atan2(sin_yaw, cos_yaw)
 
+    @staticmethod
+    def _wrap_to_pi(angle):
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
     def enable_rollout_logging(self, path, env_id=0):
         if not 0 <= env_id < self.num_envs:
             raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
@@ -605,7 +626,13 @@ class NeuralEnvironment():
                 "y",
                 "z",
                 "body_yaw_world_rad",
+                "body_yaw_rate_world_rad_s",
+                "torso_height_m",
                 "heading_yaw_rad",
+                "desired_travel_yaw_world_rad",
+                "body_yaw_error_to_heading_ref_rad",
+                "body_yaw_error_to_desired_travel_rad",
+                "turn_complete_to_heading_ref",
                 "current_waypoint_id",
                 "target_x",
                 "target_y",
@@ -614,6 +641,10 @@ class NeuralEnvironment():
                 "quat_y",
                 "quat_z",
                 "quat_w",
+                "forward_x_world",
+                "forward_z_world",
+                "forward_yaw_world_rad",
+                "root_euler_yaw_world_rad"
             ],
         )
         self._rollout_log_writer.writeheader()
@@ -622,6 +653,47 @@ class NeuralEnvironment():
         self._rollout_log_env = env_id
         self._rollout_log_step = 0
         self._rollout_log_path = output_path
+
+
+    def enable_contact_logging(self, output_path, env_id):
+        if self._contact_log_writer is not None:
+            self.disable_contact_logging()
+
+        self._contact_log_writer = h5py.File(output_path, "w")
+        self._contact_log_env = env_id
+        self._contact_log_step = 0
+        self._contact_log_path = Path(output_path)
+
+        contact = self._build_contact_record(env_id)
+        num_slots = len(contact["shape0"])
+
+        writer = self._contact_log_writer
+
+        # Fixed metadata: written once.
+        metadata = writer.create_group("metadata")
+        metadata.create_dataset("shape0", data=contact["shape0"])
+        metadata.create_dataset("shape1", data=contact["shape1"])
+        metadata.create_dataset("local_point0", data=contact["point0"])
+
+        # Per-step datasets: first dimension grows over time.
+        writer.create_dataset("step", shape=(0,), maxshape=(None,), dtype="i8")
+        writer.create_dataset(
+            "depth", shape=(0, num_slots),
+            maxshape=(None, num_slots), dtype="f4"
+        )
+        writer.create_dataset(
+            "normal", shape=(0, num_slots, 3),
+            maxshape=(None, num_slots, 3), dtype="f4"
+        )
+        writer.create_dataset(
+            "ground_point", shape=(0, num_slots, 3),
+            maxshape=(None, num_slots, 3), dtype="f4"
+        )
+
+    def disable_contact_logging(self):
+        if self._contact_log_writer is not None:
+            self._contact_log_writer.close()
+            self._contact_log_writer = None
 
     def disable_rollout_logging(self):
         self._rollout_log_enabled = False
@@ -637,6 +709,25 @@ class NeuralEnvironment():
         qd = state[q_dim:]
         quat_xyzw = q[3:7].tolist()
 
+        quat = q[3:7]
+
+        forward_world = self._quat_rotate(
+            quat,
+            q.new_tensor([1.0, 0.0, 0.0])   # local body +X
+        )
+
+        forward_yaw = math.atan2(
+            -float(forward_world[2]),
+            float(forward_world[0]),
+        )
+
+
+        body_yaw = forward_yaw
+        # The root generalized velocity stores world angular velocity first;
+        # Y is the yaw axis in this simulator's Y-up convention.
+        root_euler_yaw_world = self._quat_to_yaw_y_up(quat)
+        body_yaw_rate = float(qd[1])
+
         record = {
             "step": self._rollout_log_step,
             "env_id": env_id,
@@ -646,12 +737,22 @@ class NeuralEnvironment():
                 "z": float(q[2]),
             },
             "quaternion_xyzw_world": quat_xyzw,
-            "body_yaw_world_rad": self._quat_to_yaw_y_up(quat_xyzw),
+            "body_yaw_world_rad": body_yaw,
+            "body_yaw_rate_world_rad_s": body_yaw_rate,
+            "torso_height_m": float(q[1]),
             "generalized_velocity": qd.tolist(),
+            "forward_x_world": float(forward_world[0]),
+            "forward_z_world": float(forward_world[2]),
+            "forward_yaw_world_rad": forward_yaw,
+            "root_euler_yaw_world_rad": root_euler_yaw_world,  # optional
         }
 
         if hasattr(self.env, "heading_yaws"):
-            record["heading_yaw_rad"] = float(self.env.heading_yaws[env_id])
+            heading_yaw = float(self.env.heading_yaws[env_id])
+            record["heading_yaw_rad"] = heading_yaw
+            record["body_yaw_error_to_heading_ref_rad"] = self._wrap_to_pi(
+                body_yaw - heading_yaw
+            )
 
         if hasattr(self.env, "current_waypoint_ids"):
             waypoint_id = int(self.env.current_waypoint_ids[env_id])
@@ -663,8 +764,53 @@ class NeuralEnvironment():
                     "y": float(target[1]),
                     "z": float(target[2]),
                 }
+                desired_travel_yaw = -math.atan2(
+                    float(target[2] - q[2]), float(target[0] - q[0])
+                )
+                record["desired_travel_yaw_world_rad"] = desired_travel_yaw
+                record["body_yaw_error_to_desired_travel_rad"] = (
+                    self._wrap_to_pi(body_yaw - desired_travel_yaw)
+                )
+
+        # ``heading_yaw_rad`` is a velocity-frame reference, not a physical
+        # torso target.  This flag is intentionally named to reflect that: it
+        # answers whether the torso is aligned and settled relative to that
+        # reference, without changing the controller's waypoint behavior.
+        heading_error = record.get("body_yaw_error_to_heading_ref_rad")
+        if heading_error is not None:
+            min_height = float(
+                getattr(self.env, "waypoint_heading_min_torso_height", 0.0)
+            )
+            max_yaw_rate = float(
+                getattr(self.env, "waypoint_heading_max_angular_speed", float("inf"))
+            )
+            record["turn_complete_to_heading_ref"] = bool(
+                abs(heading_error) <= self.ROLLOUT_BODY_YAW_TOLERANCE_RAD
+                and abs(body_yaw_rate) <= max_yaw_rate
+                and float(q[1]) >= min_height
+            )
 
         return record
+
+    def _build_contact_record(self, env_id):
+        if not 0 <= env_id < self.num_envs:
+            raise ValueError(f"env_id must be in [0, {self.num_envs - 1}]")
+
+        model = self.model
+        slots_per_env = self.num_contacts_per_env
+        start = env_id * slots_per_env
+        end = start + slots_per_env
+
+        return {
+            "env_id": env_id,
+            "shape0": wp.to_torch(model.rigid_contact_shape0)[start:end].cpu().numpy().copy(),
+            "shape1": wp.to_torch(model.rigid_contact_shape1)[start:end].cpu().numpy().copy(),
+            "point0": wp.to_torch(model.rigid_contact_point0)[start:end].cpu().numpy().copy(),
+            "point1": wp.to_torch(model.rigid_contact_point1)[start:end].cpu().numpy().copy(),
+            "normal": wp.to_torch(model.rigid_contact_normal)[start:end].cpu().numpy().copy(),
+            "depth": wp.to_torch(model.rigid_contact_depth)[start:end].cpu().numpy().copy(),
+        }
+
 
     def _append_rollout_record(self):
         if not self._rollout_log_enabled:
@@ -680,7 +826,21 @@ class NeuralEnvironment():
                 "y": record["position_world"]["y"],
                 "z": record["position_world"]["z"],
                 "body_yaw_world_rad": record["body_yaw_world_rad"],
+                "body_yaw_rate_world_rad_s": record["body_yaw_rate_world_rad_s"],
+                "torso_height_m": record["torso_height_m"],
                 "heading_yaw_rad": record.get("heading_yaw_rad"),
+                "desired_travel_yaw_world_rad": record.get(
+                    "desired_travel_yaw_world_rad"
+                ),
+                "body_yaw_error_to_heading_ref_rad": record.get(
+                    "body_yaw_error_to_heading_ref_rad"
+                ),
+                "body_yaw_error_to_desired_travel_rad": record.get(
+                    "body_yaw_error_to_desired_travel_rad"
+                ),
+                "turn_complete_to_heading_ref": record.get(
+                    "turn_complete_to_heading_ref"
+                ),
                 "current_waypoint_id": record.get("current_waypoint_id"),
                 "target_x": target.get("x"),
                 "target_y": target.get("y"),
@@ -689,10 +849,38 @@ class NeuralEnvironment():
                 "quat_y": quat[1],
                 "quat_z": quat[2],
                 "quat_w": quat[3],
+                "forward_x_world": record.get("forward_x_world"),
+                "forward_z_world": record.get("forward_z_world"),
+                "forward_yaw_world_rad": record.get("forward_yaw_world_rad"),
+                "root_euler_yaw_world_rad": record.get("root_euler_yaw_world"),  # optional
+
             }
         )
+
+
+
         self._rollout_log_file.flush()
         self._rollout_log_step += 1
+
+
+    def _append_contact_record(self):
+        if self._contact_log_writer is None:
+            return
+
+        contact = self._build_contact_record(self._contact_log_env)
+        writer = self._contact_log_writer
+        row = writer["step"].shape[0]
+
+        for name in ("step", "depth", "normal", "ground_point"):
+            writer[name].resize(row + 1, axis=0)
+
+        writer["step"][row] = self._rollout_log_step - 1
+        writer["depth"][row] = contact["depth"]
+        writer["normal"][row] = contact["normal"]
+        writer["ground_point"][row] = contact["point1"]
+
+        self._contact_log_step += 1
+        writer.flush()
 
     def save_rollout_log(self, path):
         if self._rollout_log_path is None:
@@ -773,6 +961,7 @@ class NeuralEnvironment():
         # Update states
         self._update_states()
         self._append_rollout_record()
+        self._append_contact_record()
 
         if trace_env is not None:
             self._trace_transition(
@@ -830,6 +1019,9 @@ class NeuralEnvironment():
 
         # Update states
         self._update_states()
+        # Append rollout and contact records
+        self._append_rollout_record()
+        self._append_contact_record()
 
         return self.states
 

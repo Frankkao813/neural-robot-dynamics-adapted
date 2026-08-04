@@ -16,6 +16,7 @@
 import os
 import sys
 import math
+from pathlib import Path
 
 base_dir = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../")
@@ -199,6 +200,8 @@ def load_rl_config(args):
             "zigzag_angle_degree",
             "zigzag_turn_degree",
             "radius",
+            "curvy_start_angle_degree",
+            "curvy_angle_step_degree",
         ]:
             warp_env_cfg.pop(key, None)
 
@@ -280,6 +283,11 @@ def construct_env(env_specs, device, args):
                 f"--log-rollout-env must be in [0, {env.num_envs - 1}]"
             )
         env.enable_rollout_logging(args.log_rollout_path, args.log_rollout_env)
+        contact_path = Path(args.log_rollout_path).with_suffix(".contacts.h5")
+        env.enable_contact_logging(
+            contact_path,
+            args.log_rollout_env,
+        )
 
     if neural_model is not None:
         assert env.robot_name == robot_name, \
@@ -445,6 +453,34 @@ def generate_waypoints(cfg):
             waypoints.append([x, z])
         print("Generated zigzag waypoints:", waypoints)
         return waypoints
+    elif mode == "curvy_line":
+        num_waypoints = cfg.get("num_waypoints", 10)
+
+        min_step = cfg.get("step_length", 1.0)
+        max_step = cfg.get("step_length_max", 3.0)
+        start_angle_deg = cfg.get("curvy_start_angle_degree", -10.0)
+        angle_step_deg = cfg.get("curvy_angle_step_degree", 10.0)
+
+        # Absolute segment headings relative to the global x-axis.  The
+        # default sequence is -10, 0, 10, 20, 30 degrees for five waypoints.
+        desired_angles_deg = start_angle_deg + angle_step_deg * torch.arange(
+            num_waypoints, dtype=torch.float32
+        )
+        waypoints = []
+
+        x, z = 0.0, 0.0
+        for i in range(num_waypoints):
+            step = min_step + torch.rand(1).item() * (max_step - min_step)
+
+            angle_rad = math.radians(desired_angles_deg[i].item())
+
+            x += step * math.cos(angle_rad)
+            z += step * math.sin(angle_rad)
+
+            waypoints.append([x, z])
+
+        return waypoints
+
     else:
         raise ValueError(f"Unknown waypoint_mode: {mode}")
 
@@ -486,6 +522,7 @@ if __name__ == '__main__':
         env.save_usd()
     if args.log_rollout:
         env.save_rollout_log(args.log_rollout_path)
+        env.disable_contact_logging()
     
     print('visited states range:')
     for i in range(len(env.visited_state_min)):
