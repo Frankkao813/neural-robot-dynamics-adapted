@@ -184,11 +184,11 @@ def compute_observations_ant_simple(
 def compute_observations_ant_dflex(
     joint_q: wp.array(dtype=wp.float32),
     joint_qd: wp.array(dtype=wp.float32),
-    inv_start_rot: wp.quat,
     basis_vec0: wp.vec3,
     basis_vec1: wp.vec3,
     dof_q: int,
     dof_qd: int,
+    heading_quats: wp.array(dtype=wp.quat),
     # outputs
     obs: wp.array(dtype=float, ndim=2),
 ):
@@ -218,6 +218,14 @@ def compute_observations_ant_dflex(
 
     # convert the linear velocity of the torso from twist representation to the velocity of the center of mass in world frame
     lin_vel = lin_vel - wp.cross(torso_pos, ang_vel)
+
+    # Express the pose and velocities in the active waypoint-heading frame,
+    # matching AnyMAL. A policy trained to walk along +X can then steer along
+    # the route without observing a changing world-frame heading.
+    heading_inv = wp.quat_inverse(heading_quats[env_id])
+    torso_quat = heading_inv * torso_quat
+    lin_vel = wp.quat_rotate(heading_inv, lin_vel)
+    ang_vel = wp.quat_rotate(heading_inv, ang_vel)
 
     up_vec = wp.quat_rotate(torso_quat, basis_vec1)
     heading_vec = wp.quat_rotate(torso_quat, basis_vec0)
@@ -708,11 +716,11 @@ class AntEnvironment(Environment):
                 inputs=[
                     state.joint_q,
                     state.joint_qd,
-                    self.inv_start_rot,
                     self.basis_vec0,
                     self.basis_vec1,
                     self.dof_q_per_env,
                     self.dof_qd_per_env,
+                    self.heading_quats,
                 ],
                 outputs=[observations],
                 device=self.device,
