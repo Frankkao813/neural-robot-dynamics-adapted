@@ -10,11 +10,12 @@ env:
   warp_env_cfg:
     task: run
     obs_type: dflex
-    random_reset: True
+    # random_reset: True
     camera_tracking: True
     waypoint_tolerance: 0.75
     terminate_on_last_waypoint: true
     random_reset: false
+    action_scale: 0.8
     # Warp uses Y-up, so these are (X, Y, Z) waypoints on the ground plane.
     # This is the next step after the single forward waypoint: walk forward,
     # then make one 90-degree turn toward +Z.

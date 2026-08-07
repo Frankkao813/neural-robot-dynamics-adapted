@@ -371,6 +371,7 @@ class AntEnvironment(Environment):
         waypoints=None,
         waypoint_tolerance=0.75,
         terminate_on_last_waypoint=False,
+        action_scale=1.0,
         **kwargs
     ):
         self.seed = seed
@@ -384,6 +385,7 @@ class AntEnvironment(Environment):
         self.terminate_on_last_waypoint = terminate_on_last_waypoint
         self.current_waypoint_ids = np.zeros(num_envs, dtype=np.int32)
         self.completed_waypoint_route = np.zeros(num_envs, dtype=bool)
+        self.action_scale = float(action_scale)
         if heading_yaws is None:
             heading_yaws = [0.0] * num_envs
         if len(heading_yaws) != num_envs:

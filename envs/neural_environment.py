@@ -942,8 +942,9 @@ class NeuralEnvironment():
         self.set_env_mode(env_mode)
         # Convert actions to real values and copy to joint_act array in warp_env
         if self.action_dim > 0:
+            scaled_actions = actions * getattr(self.env, "action_scale", 1.0)
             self.env.assign_control(
-                wp.from_torch(actions), 
+                wp.from_torch(scaled_actions),
                 self.env.control,
                 self.env.state
             )
