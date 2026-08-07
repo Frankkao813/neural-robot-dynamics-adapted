@@ -306,6 +306,9 @@ def construct_env(env_specs, device, args):
     return env
 
 def construct_rlg_config(rl_cfg):
+    # check we resume from the last checkpoint in the experiment folder
+    resume_path = rl_cfg["rl"].get("resume_path", "")
+
     rlg_config_dict = {}
     rlg_config_dict['params'] = {
         "seed": rl_cfg['seed'],
@@ -325,8 +328,8 @@ def construct_rlg_config(rl_cfg):
             },
             **rl_cfg['rl']["network"]
         },
-        "load_checkpoint": False,
-        "load_path": "",
+        "load_checkpoint": rl_cfg['rl'].get('resume', False),
+        "load_path": resume_path,
         "config": {
             **rl_cfg['rl']['config'],
             "env_name": "warp",

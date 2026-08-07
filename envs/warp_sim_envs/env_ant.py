@@ -76,6 +76,61 @@ def ant_running_cost(
             terminated[env_id] = True
 
 
+
+
+# intialize a new walking cost function for the ant environment
+@wp.kernel
+def ant_walking_cost(
+    joint_q: wp.array(dtype=wp.float32),
+    joint_qd: wp.array(dtype=wp.float32),
+    heading_quats: wp.array(dtype=wp.quat),
+    basis_vec0: wp.vec3,
+    basis_vec1: wp.vec3,
+    dof_q: int,
+    dof_qd: int,
+    # outputs
+    cost: wp.array(dtype=wp.float32),
+    terminated: wp.array(dtype=wp.bool),
+):
+    env_id = wp.tid()
+    
+    torso_pos = wp.vec3(joint_q[dof_q * env_id + 0],
+                        joint_q[dof_q * env_id + 1],
+                        joint_q[dof_q * env_id + 2])
+    torso_quat = wp.quat(joint_q[dof_q * env_id + 3],
+                        joint_q[dof_q * env_id + 4],
+                        joint_q[dof_q * env_id + 5],
+                        joint_q[dof_q * env_id + 6])
+    lin_vel = wp.vec3(joint_qd[dof_qd * env_id + 3],
+                      joint_qd[dof_qd * env_id + 4],
+                      joint_qd[dof_qd * env_id + 5])
+    ang_vel = wp.vec3(joint_qd[dof_qd * env_id + 0],
+                      joint_qd[dof_qd * env_id + 1],
+                      joint_qd[dof_qd * env_id + 2])
+    
+    # convert the linear velocity of the torso from twist representation to the velocity of the center of mass in world frame
+    lin_vel = lin_vel - wp.cross(torso_pos, ang_vel)
+
+    up_vec = wp.quat_rotate(torso_quat, basis_vec1)
+    heading_vec = wp.quat_rotate(torso_quat, basis_vec0)
+    target_heading = wp.quat_rotate(heading_quats[env_id], basis_vec0)
+
+    target_speed = 1.0 
+
+    speed_error = wp.dot(lin_vel, target_heading) - target_speed
+    up_reward = up_vec[1] * 0.1
+    heading_reward = wp.dot(heading_vec, target_heading)
+    progress_reward = -speed_error * speed_error
+
+    c = -progress_reward - up_reward - heading_reward
+
+    wp.atomic_add(cost, env_id, c)
+
+    if terminated:
+        if torso_pos[1] < 0.3:
+            terminated[env_id] = True
+
+
 @wp.kernel(enable_backward=False)
 def apply_extra_termination(
     extra_terminated: wp.array(dtype=wp.bool),
@@ -658,6 +713,22 @@ class AntEnvironment(Environment):
                     state.joint_q,
                     state.joint_qd,
                     self.inv_start_rot,
+                    self.basis_vec0,
+                    self.basis_vec1,
+                    self.dof_q_per_env,
+                    self.dof_qd_per_env,
+                ],
+                outputs=[cost, terminated],
+                device=self.device,
+            )
+        elif self.task == "walk":
+            wp.launch(
+                ant_walking_cost,
+                dim=self.num_envs,
+                inputs=[
+                    state.joint_q,
+                    state.joint_qd,
+                    self.heading_quats,
                     self.basis_vec0,
                     self.basis_vec1,
                     self.dof_q_per_env,
