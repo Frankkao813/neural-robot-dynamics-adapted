@@ -6,3 +6,4 @@ from .env_anymal import AnymalEnvironment
 from .env_anymal_joint_position_control import AnymalJointPositionControlEnvironment
 from .env_pendulum_with_contact import PendulumWithContactEnvironment
 from .env_cube_toss import CubeTossingEnvironment
+from .env_unicycle import UnicycleEnvironment
