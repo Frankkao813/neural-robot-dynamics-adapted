@@ -306,9 +306,6 @@ def construct_env(env_specs, device, args):
     return env
 
 def construct_rlg_config(rl_cfg):
-    # check we resume from the last checkpoint in the experiment folder
-    resume_path = rl_cfg["rl"].get("resume_path", "")
-
     rlg_config_dict = {}
     rlg_config_dict['params'] = {
         "seed": rl_cfg['seed'],
@@ -328,8 +325,6 @@ def construct_rlg_config(rl_cfg):
             },
             **rl_cfg['rl']["network"]
         },
-        "load_checkpoint": rl_cfg['rl'].get('resume', False),
-        "load_path": resume_path,
         "config": {
             **rl_cfg['rl']['config'],
             "env_name": "warp",
@@ -338,18 +333,15 @@ def construct_rlg_config(rl_cfg):
             "mixed_precision": True,
             "value_bootstrap": True,
             "num_actors": rl_cfg['env']['num_envs'],
-            "load_checkpoint": rl_cfg['rl'].get('resume', False),
-            "load_path": resume_path,
         },
     }
     return rlg_config_dict
 
-def train_policy(runner):
-    runner.run(
-        {
-            "train": True,
-        }
-    )
+def train_policy(runner, checkpoint_path=None):
+    run_args = {"train": True}
+    if checkpoint_path:
+        run_args["checkpoint"] = checkpoint_path
+    runner.run(run_args)
 
 def evaluate_policy(runner, policy_path):
     results = runner.run(
@@ -517,7 +509,10 @@ if __name__ == '__main__':
         env.start_video_export(args.export_video_path)
 
     if args.playback is None:
-        train_policy(runner)
+        resume_path = ""
+        if rl_config["rl"].get("resume", False):
+            resume_path = rl_config["rl"].get("resume_path", "")
+        train_policy(runner, resume_path)
     else:
         evaluate_policy(runner, args.playback)
 
