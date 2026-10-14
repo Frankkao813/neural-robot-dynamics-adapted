@@ -338,6 +338,8 @@ def construct_rlg_config(rl_cfg):
             "mixed_precision": True,
             "value_bootstrap": True,
             "num_actors": rl_cfg['env']['num_envs'],
+            "load_checkpoint": rl_cfg['rl'].get('resume', False),
+            "load_path": resume_path,
         },
     }
     return rlg_config_dict
