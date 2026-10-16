@@ -6,18 +6,42 @@ an Xvfb display in a batch job) to save an animation using FFmpeg.
 """
 
 import argparse
+import faulthandler
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+
+
+_start_time = time.monotonic()
+
+
+def report_progress(message):
+    print(f"[unicycle +{time.monotonic() - _start_time:.1f}s] {message}", flush=True)
+    if __name__ == "__main__":
+        # A stall produces a Python stack in the Slurm .err log. This only
+        # reports the stack; it does not terminate a slow compilation or job.
+        faulthandler.dump_traceback_later(120, repeat=True)
+
+
+if __name__ == "__main__":
+    faulthandler.enable()
+    report_progress("Importing Warp")
 
 import warp as wp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+if __name__ == "__main__":
+    report_progress("Importing simulation environments")
+
 from envs.warp_sim_envs.env_unicycle import RenderMode, UnicycleEnvironment
+
+if __name__ == "__main__":
+    report_progress("Imports complete")
 
 
 def encode_gif(frames_dir, output_path, fps, ffmpeg):
@@ -63,6 +87,7 @@ def main():
         if ffmpeg is None:
             parser.error("FFmpeg was not found on PATH; load the FFmpeg module before exporting")
         args.export_video_path.parent.mkdir(parents=True, exist_ok=True)
+    report_progress(f"Creating environment on {args.device} (including initial kernel compilation)")
     env = UnicycleEnvironment(
         num_envs=args.num_envs, device=args.device,
         render_mode=RenderMode.NONE if args.headless else RenderMode.OPENGL,
@@ -70,6 +95,7 @@ def main():
     )
     frame_folder = None
     try:
+        report_progress("Environment ready")
         # An elevated camera keeps the default 2 m radius circle in view.
         # Warp camera positions are in scaled renderer coordinates.
         env.opengl_render_settings = dict(
@@ -77,9 +103,12 @@ def main():
             camera_pos=(0.0, 12.0, 22.0), camera_front=(0.0, -0.6, -1.0),
             device=env.device,
         )
+        report_progress("Initializing renderer" if not args.headless else "Rendering disabled")
         env.setup_renderer()
+        report_progress("Renderer setup complete")
         pixels = None
         if args.export_video_path is not None:
+            report_progress("Preparing video capture")
             import cv2
 
             frame_folder = tempfile.TemporaryDirectory(
@@ -91,21 +120,29 @@ def main():
             )
         frame_count = 0
         env.set_commands([[args.speed, args.turn_rate]] * args.num_envs)
-        for _ in range(args.steps):
+        report_progress(f"Starting {args.steps} simulation steps")
+        for step in range(args.steps):
             if env.renderer is not None and not env.renderer.is_running():
                 break
             env.update()
+            if step == 0:
+                report_progress("First dynamics step complete; rendering first frame")
             env.render()
             if pixels is not None:
+                if step == 0:
+                    report_progress("First render complete; reading frame pixels")
                 if not env.renderer.get_pixels(pixels, split_up_tiles=False, mode="rgb", use_uint8=True):
                     raise RuntimeError(f"Failed to capture video frame {frame_count}.")
                 frame_path = Path(frame_folder.name) / f"{frame_count:06d}.png"
                 if not cv2.imwrite(str(frame_path), pixels.numpy()[:, :, ::-1]):
                     raise RuntimeError(f"Failed to write video frame: {frame_path}")
                 frame_count += 1
+            if (step + 1) % 60 == 0 or step == 0 or step + 1 == args.steps:
+                report_progress(f"Completed {step + 1}/{args.steps} steps; captured {frame_count} frames")
         print("Final local poses (x, z, theta):")
         print(env.get_pose())
         if frame_folder is not None:
+            report_progress("Encoding GIF with FFmpeg")
             encode_gif(frame_folder.name, args.export_video_path, 1.0 / env.frame_dt, ffmpeg)
             print(f"Saved {frame_count} frames to {args.export_video_path.resolve()}")
     finally:
@@ -115,4 +152,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        faulthandler.cancel_dump_traceback_later()
