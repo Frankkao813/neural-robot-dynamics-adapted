@@ -942,7 +942,12 @@ class NeuralEnvironment():
         self.set_env_mode(env_mode)
         # Convert actions to real values and copy to joint_act array in warp_env
         if self.action_dim > 0:
-            scaled_actions = actions * getattr(self.env, "action_scale", 1.0)
+            # This wrapper-level multiplier is Ant's torque adjustment.
+            # ANYmal's position controller applies its own action_scale when
+            # converting policy actions to joint targets; do not apply it twice.
+            scaled_actions = actions
+            if self.robot_name == "Ant":
+                scaled_actions = actions * getattr(self.env, "action_scale", 1.0)
             self.env.assign_control(
                 wp.from_torch(scaled_actions),
                 self.env.control,

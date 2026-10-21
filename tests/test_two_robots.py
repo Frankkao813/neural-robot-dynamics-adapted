@@ -11,6 +11,7 @@ from utils.run_two_robots import (
     DEFAULT_CONFIG, DEFAULT_POLICY, SharedScene, TwoRobotSimulation,
     load_anymal_config, parse_arguments,
 )
+from envs.neural_environment import NeuralEnvironment
 
 
 class TwoRobotTests(unittest.TestCase):
@@ -50,6 +51,36 @@ class TwoRobotTests(unittest.TestCase):
         for _ in range(3):
             self.sim.step()
         torch.testing.assert_close(self.sim.anymal.states, reference, rtol=1e-5, atol=1e-6)
+
+    def test_anymal_joint_targets_scale_actions_once(self):
+        actions = torch.full((1, self.sim.anymal.action_dim), 0.2)
+        baseline = self.sim.anymal.env.default_joint_q.numpy()[7:].copy()
+        self.sim.anymal.step(actions)
+        # A 0.2 policy action requests a 0.1-radian offset with scale=0.5.
+        np.testing.assert_allclose(self.sim.anymal.env.target_joint_q.numpy(),
+                                   baseline + 0.1, atol=1e-6)
+
+    def test_anymal_policy_walks_for_ten_seconds(self):
+        initial_x = float(self.sim.anymal.states[0, 0])
+        for step in range(600):
+            self.assertFalse(self.sim.step(), f"ANYmal terminated at step {step + 1}")
+        self.assertTrue(torch.isfinite(self.sim.anymal.states).all())
+        self.assertGreater(float(self.sim.anymal.states[0, 0]) - initial_x, 5.0)
+
+    def test_ant_torque_scaling_is_preserved(self):
+        ant = NeuralEnvironment(
+            env_name="Ant", num_envs=1, device="cpu", render=False,
+            default_env_mode="ground-truth",
+            warp_env_cfg={"random_reset": False, "setup_renderer": False,
+                          "action_scale": 0.5},
+        )
+        try:
+            ant.reset()
+            ant.step(torch.full((1, ant.action_dim), 0.25))
+            np.testing.assert_allclose(ant.joint_control.joint_act.numpy(),
+                                       np.asarray(ant.control_gains) * 0.25 * 0.5)
+        finally:
+            ant.close()
 
     def test_shared_renderer_receives_both_robot_poses(self):
         self.sim.step()
