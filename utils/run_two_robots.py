@@ -1,8 +1,9 @@
 """Visualize a policy-controlled ANYmal and a kinematic unicycle together.
 
 Both robots share world coordinates, simulation time, ground visualization,
-and one camera. Their simulation models remain independent: robot-to-robot
-collisions are intentionally absent. ANYmal uses the existing ground-truth
+and one camera. Their simulation models remain independent, with no physical
+robot-to-robot contact response. Optional planar footprint detection stops
+the rollout on contact. ANYmal uses the existing ground-truth
 NeuralEnvironment path and its unchanged policy observation/action interface.
 
 From the repository root:
@@ -52,6 +53,12 @@ from utils.run_unicycle import encode_gif
 
 DEFAULT_CONFIG = ROOT / "eval/eval_rl/cfg/Anymal/anymal_forward.yaml"
 DEFAULT_POLICY = ROOT / "pretrained_models/RL_policies/Anymal/forward_walk/0/nn/AnymalPPO.pth"
+
+
+def footprints_overlap(anymal_position, unicycle_position, anymal_radius, unicycle_radius):
+    """Check touching/overlapping circular footprints in the (X, Z) plane."""
+    return math.hypot(anymal_position[0] - unicycle_position[0],
+                      anymal_position[1] - unicycle_position[1]) <= anymal_radius + unicycle_radius
 
 
 def load_anymal_config(config_path, checkpoint_path, seed):
@@ -106,7 +113,13 @@ class TwoRobotSimulation:
     """One rollout clock with independent ANYmal and unicycle dynamics."""
 
     def __init__(self, cfg, checkpoint, device="cpu", anymal_position=(0.0, 0.0),
-                 unicycle_pose=(0.0, 2.0, 0.0), speed=1.0, turn_rate=0.5):
+                 unicycle_pose=(0.0, 2.0, 0.0), speed=1.0, turn_rate=0.5,
+                 stop_on_collision=False, anymal_radius=0.6, unicycle_radius=0.25):
+        if not all(math.isfinite(r) and r > 0 for r in (anymal_radius, unicycle_radius)):
+            raise ValueError("Footprint radii must be finite and positive.")
+        self.stop_on_collision = stop_on_collision
+        self.anymal_radius, self.unicycle_radius = anymal_radius, unicycle_radius
+        self.collision = None
         self.anymal = None
         self.unicycle = None
         self.elapsed = 0.0
@@ -154,8 +167,31 @@ class TwoRobotSimulation:
         self.unicycle.set_commands([[self.speed, self.turn_rate]])
         self.player.reset()
         self.episode_step = 0
+        self.collision = None
+        self._check_collision()
+
+    def _check_collision(self):
+        if not self.stop_on_collision:
+            return False
+        bodies, uni = self.transforms()
+        anymal_position = tuple(map(float, bodies[0, [0, 2]]))
+        unicycle_position = tuple(map(float, uni[[0, 2]]))
+        if footprints_overlap(anymal_position, unicycle_position,
+                              self.anymal_radius, self.unicycle_radius):
+            self.collision = {
+                "time": self.elapsed,
+                "anymal_position": anymal_position,
+                "unicycle_position": unicycle_position,
+                "distance": math.hypot(anymal_position[0] - unicycle_position[0],
+                                       anymal_position[1] - unicycle_position[1]),
+            }
+            return True
+        return False
 
     def step(self):
+        # A collision is latched until an explicit reset, including spawn overlap.
+        if self.collision is not None:
+            return True
         self.anymal.compute_observations(self.obs, self.episode_step, self.horizon)
         actions = self.player.get_action(wp.to_torch(self.obs), is_deterministic=True)
         if not torch.isfinite(actions).all():
@@ -163,7 +199,10 @@ class TwoRobotSimulation:
         for _ in range(self.control_steps):
             self.anymal.step(actions)
             self.unicycle.update()
-        self.elapsed += self.control_dt
+            self.elapsed += self.frame_dt
+            if self._check_collision():
+                self.episode_step += 1
+                return True
         self.episode_step += 1
         self.cost.zero_()
         self.done.zero_()
@@ -180,12 +219,15 @@ class TwoRobotSimulation:
 
     def records(self, step):
         anymal_bodies, unicycle_body = self.transforms()
+        distance = math.hypot(float(anymal_bodies[0, 0] - unicycle_body[0]),
+                              float(anymal_bodies[0, 2] - unicycle_body[2]))
         for robot, transform in (("anymal", anymal_bodies[0]), ("unicycle", unicycle_body)):
             x, y, z, qx, qy, qz, qw = map(float, transform)
             # Planar heading from the body's local +X, positive toward world +Z.
             theta = math.atan2(2 * (qx * qz - qw * qy), 1 - 2 * (qy * qy + qz * qz))
             commands = self.unicycle.control.unicycle_commands.numpy()[0] if robot == "unicycle" else ("", "")
-            yield [step, self.elapsed, self.episode, robot, x, y, z, theta, qx, qy, qz, qw, *commands]
+            yield [step, self.elapsed, self.episode, robot, x, y, z, theta, qx, qy, qz, qw, *commands,
+                   int(self.collision is not None), distance, self.anymal_radius + self.unicycle_radius]
 
     def close(self):
         if self.unicycle is not None:
@@ -246,6 +288,12 @@ def parse_arguments(argv=None):
     parser.add_argument("--anymal-position", type=float, nargs=2, default=(0, 0), metavar=("X", "Z"))
     parser.add_argument("--unicycle-pose", type=float, nargs=3, default=(0, 2, 0), metavar=("X", "Z", "THETA"))
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--stop-on-collision", action="store_true",
+                        help="Stop on circular footprint contact, even with --reset-on-done.")
+    parser.add_argument("--anymal-radius", type=float, default=0.6,
+                        help="Approximate ANYmal planar footprint radius in metres (default: 0.6).")
+    parser.add_argument("--unicycle-radius", type=float, default=0.25,
+                        help="Approximate unicycle planar footprint radius in metres (default: 0.25).")
     parser.add_argument("--headless", action="store_true", help="Disable all rendering (cannot export GIF).")
     parser.add_argument("--reset-on-done", action="store_true", help="Reset both robots on ANYmal termination; otherwise stop.")
     parser.add_argument("--export-video-path", type=Path)
@@ -253,6 +301,8 @@ def parse_arguments(argv=None):
     args = parser.parse_args(argv)
     if args.steps < 1:
         parser.error("--steps must be positive")
+    if not all(math.isfinite(r) and r > 0 for r in (args.anymal_radius, args.unicycle_radius)):
+        parser.error("Footprint radii must be finite and positive")
     if not all(math.isfinite(v) for v in [args.speed, args.turn_rate, *args.anymal_position, *args.unicycle_pose]):
         parser.error("Commands and spawn poses must be finite")
     for source in (args.rl_cfg, args.playback):
@@ -277,7 +327,8 @@ def main(argv=None):
     scene = simulation = frame_folder = csv_file = None
     try:
         simulation = TwoRobotSimulation(cfg, args.playback, args.device, args.anymal_position,
-                                        args.unicycle_pose, args.speed, args.turn_rate)
+                                        args.unicycle_pose, args.speed, args.turn_rate,
+                                        args.stop_on_collision, args.anymal_radius, args.unicycle_radius)
         if not args.headless:
             progress("Creating shared OpenGL scene")
             scene = SharedScene(simulation)
@@ -287,7 +338,8 @@ def main(argv=None):
             csv_file = args.csv_path.open("x", newline="")
             writer = csv.writer(csv_file)
             writer.writerow(["step", "time", "episode", "robot", "x", "y", "z", "theta",
-                             "qx", "qy", "qz", "qw", "command_v", "command_omega"])
+                             "qx", "qy", "qz", "qw", "command_v", "command_omega",
+                             "collision", "planar_distance", "collision_distance"])
             writer.writerows(simulation.records(0))
         pixels = None
         if args.export_video_path is not None:
@@ -297,11 +349,12 @@ def main(argv=None):
             pixels = wp.empty((scene.renderer.screen_height, scene.renderer.screen_width, 3), dtype=wp.uint8, device=args.device)
         frame_count = 0
         progress(f"Starting {args.steps} steps; control dt={simulation.control_dt:g} s")
-        for step in range(1, args.steps + 1):
+        # Spawn overlap still gets one rendered/exported frame, with no dynamics step.
+        for step in range(0 if simulation.collision is not None else 1, args.steps + 1):
             if scene is not None and not scene.renderer.is_running():
                 break
-            done = simulation.step()
-            if writer is not None:
+            done = simulation.step() if step > 0 else True
+            if writer is not None and step > 0:
                 writer.writerows(simulation.records(step))
             if scene is not None:
                 scene.render()
@@ -315,6 +368,14 @@ def main(argv=None):
                 progress(f"Completed {step}/{args.steps} steps; simulated time={simulation.elapsed:.3f} s")
                 if csv_file is not None:
                     csv_file.flush()
+            if simulation.collision is not None:
+                contact = simulation.collision
+                progress(f"Footprint collision at t={contact['time']:.6f} s; "
+                         f"ANYmal XZ={contact['anymal_position']}, unicycle XZ={contact['unicycle_position']}; "
+                         f"distance={contact['distance']:.6f} m, "
+                         f"threshold={simulation.anymal_radius + simulation.unicycle_radius:.6f} m. "
+                         "Terminating without reset.")
+                break
             if done:
                 progress(f"ANYmal episode ended at step {step} (termination or horizon)")
                 if not args.reset_on_done:

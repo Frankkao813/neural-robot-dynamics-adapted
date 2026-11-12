@@ -1,0 +1,13 @@
+# Additional packages absent from Robotarium libraries.txt checked 2026-11-02.
+# Versions come from the working local headless ANYmal environment.
+# This is a dependency request, NOT a validated Robotarium/Linux lockfile.
+# Install with dependency resolution enabled; do not use --no-deps.
+# Keep Robotarium's existing core packages; test compatibility before deployment.
+warp-lang==1.8.0
+rl-games==1.6.5
+h5py==3.11.0
+tqdm==4.67.1
+trimesh==4.7.1
+pycollada==0.9.2
+gymnasium[classic-control]==0.29.1
+psutil==5.9.8

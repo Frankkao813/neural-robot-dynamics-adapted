@@ -118,6 +118,70 @@ python batch_eval_policy.py --num-envs 2048 --num-games 2048 --eval-cfg ./eval_c
 > Some released NeRD models were trained using the data generated from an older version of Warp (i.e., Warp 1.5.1), thus the motion produced by NeRD models might not match the ground-truth dynamics generated with the latest version of Warp. While it does not affect the behavior of the NeRD models' prediction, to fully reproduce the numbers reported in the paper, please use Warp 1.5.1 for *Ant* and *Pendulum* and use Warp 1.8.0 for *ANYmal*, otherwise you can also train your own NeRD models by following the instructions shown in the next section.
 
 
+### ANYmal and unicycle pass-through baseline
+
+From the repository root, run the existing shared-scene runner with a head-on
+encounter. ANYmal starts at ground-plane `(X, Z) = (0, 0)` and its default
+forward-walking policy moves toward +X. The unicycle starts at `(4, 0)`, faces
+-X (`theta = pi` radians), and drives straight at 1 m/s:
+
+```bash
+python utils/run_two_robots.py --device cuda:0 --steps 600 --seed 0 --speed 1.0 --turn-rate 0 --anymal-position 0 0 --unicycle-pose 4 0 3.141592653589793 --export-video-path outputs/pass_through.gif --csv-path outputs/pass_through.csv
+```
+
+This uses the existing independent dynamics: there is no robot-to-robot
+collision detection, response, or avoidance. The expected result is that the
+robots approach, overlap in the ground-plane projection, and continue past
+each other. The low unicycle may appear to pass underneath ANYmal's torso;
+planar overlap does not necessarily imply intersecting 3D body geometry.
+ANYmal's actual lateral drift and encounter time depend on the policy rollout.
+The run ends after 600 control steps (10 seconds with the default config), or
+earlier if ANYmal terminates. Do not use `--reset-on-done` for this experiment,
+so resets cannot be mistaken for uninterrupted pass-through motion.
+
+For a trajectory-only run, replace `--export-video-path outputs/pass_through.gif`
+with `--headless`; `--device cpu` is also supported. The CSV records both robots
+at matching times, including their initial poses. Check that their X ordering
+reverses while their Z positions remain close, then inspect the GIF around
+their closest approach. Choose fresh output filenames for repeat runs.
+
+### Footprint collision detection and termination
+
+To repeat the head-on encounter and stop at contact, enable `--stop-on-collision`:
+
+```bash
+python utils/run_two_robots.py --device cuda:0 --steps 600 --seed 0 --speed 1.0 --turn-rate 0 --anymal-position 0 0 --unicycle-pose 4 0 3.141592653589793 --stop-on-collision --anymal-radius 0.6 --unicycle-radius 0.25 --export-video-path outputs/collision.gif --csv-path outputs/collision.csv
+```
+
+The detector compares circular footprints centered on each robot's body in the
+X-Z plane: contact occurs when center distance is at most the sum of radii.
+The default radii (ANYmal: 0.60 m, unicycle: 0.25 m) are configurable approximations,
+not exact 3D body/leg geometry or an avoidance safety margin. Height is ignored.
+Checks run at reset and after every paired simulation frame, including frames
+inside repeated policy actions. Contact is sampled at frame boundaries (default
+1/60 s); there is no swept collision test or exact time-of-impact interpolation.
+
+On contact, both robots stop advancing, the final state is logged and rendered,
+the GIF is encoded, and the run exits without resetting, even with
+`--reset-on-done`. Spawn overlap terminates at time zero and exports one frame.
+There is no bounce or contact-force response. The CSV retains its original
+columns and appends `collision` (0/1), `planar_distance` and `collision_distance`
+(sum of radii), with distances in metres. The console also reports the contact
+time and both X-Z positions. Without `--stop-on-collision`, the original
+pass-through behavior remains available; `collision` then stays zero because
+detection is disabled.
+
+On the cluster, `two_robots_video.sbatch` now enables collision detection with
+these same encounter settings and exports `outputs/collision_<job-id>.gif`
+and the matching CSV. Remove `--stop-on-collision` and choose pass-through
+output names to reproduce the baseline. Submit
+from the directory containing that script:
+
+```bash
+mkdir -p logs
+sbatch two_robots_video.sbatch
+```
+
 ## Train NeRD Models
 
 Training a NeRD model involves two steps: (1) generating datasets and (2) training a NeRD model using the generated datasets. We provided data generation and training scripts, as well as training configuration files for the examples in the paper. Below shows example training commands for *Cartpole* and *Ant*, and you can try other examples using our provided scripts.

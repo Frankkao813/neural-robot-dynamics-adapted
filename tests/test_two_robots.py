@@ -9,7 +9,7 @@ import torch
 
 from utils.run_two_robots import (
     DEFAULT_CONFIG, DEFAULT_POLICY, SharedScene, TwoRobotSimulation,
-    load_anymal_config, parse_arguments,
+    footprints_overlap, load_anymal_config, parse_arguments,
 )
 from envs.neural_environment import NeuralEnvironment
 
@@ -104,10 +104,12 @@ class TwoRobotTests(unittest.TestCase):
         self.sim.step()
         rows = list(self.sim.records(1))
         self.assertEqual([row[3] for row in rows], ["anymal", "unicycle"])
-        self.assertEqual(len(rows[0]), 14)
+        self.assertEqual(len(rows[0]), 17)
         self.assertEqual(rows[0][1], rows[1][1])
-        self.assertEqual(rows[0][-2:], ["", ""])
-        np.testing.assert_allclose(rows[1][-2:], [1.0, 0.5])
+        self.assertEqual(rows[0][12:14], ["", ""])
+        np.testing.assert_allclose(rows[1][12:14], [1.0, 0.5])
+        self.assertEqual(rows[0][14], 0)
+        self.assertEqual(rows[0][15:], rows[1][15:])
         elapsed = self.sim.elapsed
         self.sim.reset()
         self.assertEqual(self.sim.episode_step, 0)
@@ -120,6 +122,95 @@ class TwoRobotTests(unittest.TestCase):
         self.assertTrue(args.rl_cfg.is_absolute())
         with self.assertRaises(SystemExit):
             parse_arguments(["--headless", "--export-video-path", "two_robots.gif"])
+
+
+class FootprintTests(unittest.TestCase):
+    def test_contact_overlap_and_near_miss(self):
+        self.assertTrue(footprints_overlap((0, 0), (0.75, 0), 0.5, 0.25))
+        self.assertTrue(footprints_overlap((2, 3), (2, 3), 0.5, 0.25))
+        self.assertFalse(footprints_overlap((0, 0), (0, 0.751), 0.5, 0.25))
+
+    def test_invalid_radii(self):
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                parse_arguments(["--anymal-radius", value])
+
+    def test_collision_interrupts_control_repeat_at_frame_boundary(self):
+        sim = TwoRobotSimulation.__new__(TwoRobotSimulation)
+        sim.collision = None
+        sim.anymal, sim.unicycle, sim.player = Mock(), Mock(), Mock()
+        sim.elapsed, sim.episode_step, sim.horizon = 0.0, 0, 1000
+        sim.frame_dt, sim.control_steps = 0.02, 5
+        sim.obs = Mock()
+        sim.player.get_action.return_value = torch.zeros((1, 12))
+        sim._check_collision = Mock(side_effect=[False, True])
+        from unittest.mock import patch
+        with patch("utils.run_two_robots.wp.to_torch", return_value=torch.zeros((1, 37))):
+            self.assertTrue(sim.step())
+        self.assertEqual(sim.anymal.step.call_count, 2)
+        self.assertEqual(sim.unicycle.update.call_count, 2)
+        self.assertAlmostEqual(sim.elapsed, 0.04)
+        self.assertEqual(sim.episode_step, 1)
+
+
+class CollisionRolloutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cfg = load_anymal_config(DEFAULT_CONFIG, DEFAULT_POLICY, 0)
+        cls.sim = TwoRobotSimulation(cfg, DEFAULT_POLICY, device="cpu",
+                                    unicycle_pose=(4, 0, math.pi), turn_rate=0,
+                                    stop_on_collision=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.sim.close()
+
+    def setUp(self):
+        self.sim.stop_on_collision = True
+        self.sim.elapsed = 0.0
+        self.sim.reset()
+
+    def test_head_on_stops_at_first_sampled_contact_and_latches(self):
+        previous = list(self.sim.records(0))[0]
+        for step in range(1, 601):
+            if self.sim.step():
+                break
+            previous = list(self.sim.records(step))[0]
+        self.assertIsNotNone(self.sim.collision)
+        self.assertLess(step, 600)
+        self.assertGreater(previous[15], previous[16])
+        final = list(self.sim.records(step))[0]
+        self.assertEqual(final[14], 1)
+        self.assertLessEqual(final[15], final[16])
+        before = self.sim.anymal.states.clone()
+        pose, elapsed = self.sim.unicycle.get_pose(), self.sim.elapsed
+        self.assertTrue(self.sim.step())
+        torch.testing.assert_close(self.sim.anymal.states, before)
+        np.testing.assert_array_equal(self.sim.unicycle.get_pose(), pose)
+        self.assertEqual(self.sim.elapsed, elapsed)
+        self.sim.reset()
+        self.assertIsNone(self.sim.collision)
+
+    def test_initial_overlap_stops_without_advancing(self):
+        cfg = load_anymal_config(DEFAULT_CONFIG, DEFAULT_POLICY, 0)
+        sim = TwoRobotSimulation(cfg, DEFAULT_POLICY, device="cpu",
+                                 unicycle_pose=(0, 0, 0), stop_on_collision=True)
+        try:
+            self.assertIsNotNone(sim.collision)
+            self.assertTrue(sim.step())
+            self.assertEqual(sim.elapsed, 0.0)
+            self.assertEqual(sim.episode_step, 0)
+        finally:
+            sim.close()
+
+    def test_detection_disabled_preserves_pass_through(self):
+        self.sim.stop_on_collision = False
+        self.sim.reset()
+        for _ in range(200):
+            self.assertFalse(self.sim.step())
+        self.assertIsNone(self.sim.collision)
+        bodies, uni = self.sim.transforms()
+        self.assertGreater(bodies[0, 0], uni[0])
 
 
 if __name__ == "__main__":

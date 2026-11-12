@@ -33,16 +33,21 @@ python --version
 nvidia-smi
 
 # Defaults select the provided ANYmal forward-walking policy and config.
-# Both robots share the view; they do not collide with one another.
-# Restart both if ANYmal terminates, so the recording reaches 600 steps.
+# Collision experiment: ANYmal walks along +X from (0, 0); the unicycle
+# starts at (4, 0), faces -X (theta=pi), and drives straight toward ANYmal.
+# The independent models have no robot-to-robot collision response.
+# Stop at the first planar footprint contact, recording the final state.
 xvfb-run -a -s "-screen 0 1280x720x24" \
     python -u utils/run_two_robots.py \
     --device cuda:0 \
     --steps 600 \
-    --reset-on-done \
+    --seed 0 \
+    --stop-on-collision \
+    --anymal-radius 0.6 \
+    --unicycle-radius 0.25 \
     --speed 1.0 \
-    --turn-rate 0.5 \
+    --turn-rate 0 \
     --anymal-position 0 0 \
-    --unicycle-pose 0 2 0 \
-    --export-video-path "outputs/two_robots_${SLURM_JOB_ID}.gif" \
-    --csv-path "outputs/two_robots_${SLURM_JOB_ID}.csv"
+    --unicycle-pose 4 0 3.141592653589793 \
+    --export-video-path "outputs/collision_${SLURM_JOB_ID}.gif" \
+    --csv-path "outputs/collision_${SLURM_JOB_ID}.csv"
